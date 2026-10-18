@@ -191,6 +191,19 @@ foreach ($ext in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'jp2', 'j2
   Assert-Equal $selection[0] 'Single' "$ext context menu selection"
   Assert-Equal $selection[1] 'PdfcraftImageContextMenu' "$ext context menu selection component"
 }
+foreach ($ext in @('doc', 'docx', 'ppt', 'pptx')) {
+  $key = 'Software\Classes\SystemFileAssociations\.' + $ext + '\shell\PdfCraft.CreatePdf'
+  $menu = Read-Row ('SELECT `Value`, `Component_`, `Root` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` IS NULL') 3
+  Assert-Equal $menu[0] 'Create PDF with PdfCraft…' "$ext context menu label"
+  Assert-Equal $menu[1] 'PdfcraftImageContextMenu' "$ext context menu component"
+  Assert-Equal $menu[2] '2' "$ext context menu HKLM root"
+  $command = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + '\command''') 2
+  Assert-Equal $command[0] '"[#PdfcraftExe]" "%1"' "$ext context menu command"
+  Assert-Equal $command[1] 'PdfcraftImageContextMenu' "$ext context menu command component"
+  $selection = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` = ''MultiSelectModel''') 2
+  Assert-Equal $selection[0] 'Document' "$ext context menu selection"
+  Assert-Equal $selection[1] 'PdfcraftImageContextMenu' "$ext context menu selection component"
+}
 $view = $Database.OpenView('SELECT `Key` FROM `Registry` WHERE `Component_` = ''PdfcraftApp''')
 try {
   [void] $view.Execute()
@@ -253,7 +266,7 @@ foreach ($value in @(@('Icon', '"[#PdfcraftExe]",0'), @('MultiSelectModel', 'Doc
 $combineCommand = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $combineKey + '\command''') 2
 Assert-Equal $combineCommand[0] '"[#PdfcraftExe]" --combine "%1"' 'PDF Combine context menu command'
 Assert-Equal $combineCommand[1] 'PdfcraftCombineContextMenu' 'PDF Combine context menu command component'
-foreach ($ext in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'jp2', 'j2k', 'jpx')) {
+foreach ($ext in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'jp2', 'j2k', 'jpx', 'doc', 'docx', 'ppt', 'pptx')) {
   $imgCombineKey = 'Software\Classes\SystemFileAssociations\.' + $ext + '\shell\PdfCraft.Combine'
   $imgCombineMenu = Read-Row ('SELECT `Value`, `Component_`, `Root` FROM `Registry` WHERE `Key` = ''' + $imgCombineKey + ''' AND `Name` IS NULL') 3
   Assert-Equal $imgCombineMenu[0] 'Combine files with PdfCraft…' "$ext Combine context menu label"

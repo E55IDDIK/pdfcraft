@@ -59,7 +59,9 @@ impl<'a> Recipe<'a> {
 
     fn accepts(&self, path: &Path) -> bool {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
-        extension == "pdf" || (self.steps.contains(&"convert") && pdfcraft_engine::CONVERTIBLE.contains(&extension.as_str()))
+        extension == "pdf"
+            || (self.steps.contains(&"convert")
+                && (pdfcraft_engine::CONVERTIBLE.contains(&extension.as_str()) || pdfcraft_platform::is_office_document(&path.to_string_lossy())))
     }
 
     fn process(&self, path: &Path) -> Result<(Arc<Vec<u8>>, Vec<Value>)> {
@@ -76,7 +78,7 @@ impl<'a> Recipe<'a> {
         for step in &self.steps {
             let before = bytes.len();
             match *step {
-                "convert" => bytes = session.convert_to_pdf(name, &bytes)?.1,
+                "convert" => bytes = crate::convert_input(&session, name, &bytes)?.1,
                 "ocr" => {
                     let engine = ocr::engine().map_err(failed)?;
                     let result = ocr::recognize_file(name, bytes, None, self.ocr.clone(), &engine, |_, _| true).map_err(failed)?;

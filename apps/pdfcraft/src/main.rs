@@ -170,6 +170,7 @@ fn rejoin_split_paths(args: Vec<String>, exists: impl Fn(&str) -> bool) -> Vec<S
 }
 
 fn main() -> eframe::Result {
+    office_helper_mode();
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     // Last-resort guard (AGENTS.md §4): commands, edits, opens and saves catch panics and report
@@ -291,6 +292,23 @@ fn main() -> eframe::Result {
         }
         other => other,
     }
+}
+
+/// Private subprocess entry point used to isolate potentially blocking Office COM automation.
+fn office_helper_mode() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|arg| arg != "--pdfcraft-office-convert") {
+        return;
+    }
+    let result = match (args.get(1), args.get(2), args.get(3)) {
+        (Some(source), Some(target), None) => pdfcraft_platform::office_to_pdf_internal(std::path::Path::new(source), std::path::Path::new(target)),
+        _ => Err("invalid internal Office conversion arguments".into()),
+    };
+    if let Err(error) = result {
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("pdfcraft Office conversion: {error}\n"));
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }
 
 /// Which renderer to start with, from `PDFCRAFT_RENDERER`.

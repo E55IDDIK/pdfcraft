@@ -3946,6 +3946,7 @@ dependencies = [
  "fmv-macos-events",
  "log",
  "pdfcraft-engine",
+ "pdfcraft-platform",
  "pdfcraft-ui-egui",
  "pollster 1.0.1",
  "raw-window-handle",
@@ -4254,6 +4255,7 @@ dependencies = [
  "async-channel",
  "futures-lite",
  "rustix 1.1.5",
+ "winsafe",
  "zbus",
 ]
 

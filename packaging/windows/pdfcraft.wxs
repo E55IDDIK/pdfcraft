@@ -213,10 +213,26 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.Combine" Value="Combine files with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.Combine" Value="Combine files with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.Combine" Value="Combine files with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.Combine" Value="Combine files with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
       </Component>
 
-      <!-- Image context menu (#190): "Create PDF with PdfCraft…" opens the DPI chooser, without
-           changing image file defaults. Its own component with an HKLM key path, so
+      <!-- Image and Office context menu (#190): "Create PDF with PdfCraft…" opens the DPI chooser for images or converts documents, without
+           changing file defaults. Its own component with an HKLM key path, so
            INSTALLIMAGECONTEXTMENU=0 leaves it out and uninstall removes it. These rows were in
            PdfcraftApp up to 0.7.1; moving them is safe because MajorUpgrade removes the old version
            before installing (afterInstallValidate), so no old row is left behind. -->
@@ -252,6 +268,22 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.CreatePdf" Value="Create PDF with PdfCraft…" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.CreatePdf" Name="MultiSelectModel" Value="Single" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.jpx\shell\PdfCraft.CreatePdf\command" Value="&quot;[#PdfcraftExe]&quot; --create-images &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.CreatePdf" Value="Create PDF with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.CreatePdf" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.CreatePdf" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.doc\shell\PdfCraft.CreatePdf\command" Value="&quot;[#PdfcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.CreatePdf" Value="Create PDF with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.CreatePdf" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.CreatePdf" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.docx\shell\PdfCraft.CreatePdf\command" Value="&quot;[#PdfcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.CreatePdf" Value="Create PDF with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.CreatePdf" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.CreatePdf" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.ppt\shell\PdfCraft.CreatePdf\command" Value="&quot;[#PdfcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.CreatePdf" Value="Create PDF with PdfCraft…" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.CreatePdf" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.CreatePdf" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pptx\shell\PdfCraft.CreatePdf\command" Value="&quot;[#PdfcraftExe]&quot; &quot;%1&quot;" Type="string" />
       </Component>
 
       <Component Id="PdfcraftCli">

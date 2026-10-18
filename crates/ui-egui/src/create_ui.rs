@@ -44,6 +44,22 @@ pub(crate) fn image_import_body(ui: &mut egui::Ui, app: &mut PdfCraftApp) -> (bo
 /// File types Open accepts besides PDF (converted on open).
 pub use pdfcraft_engine::CONVERTIBLE;
 
+pub(crate) const OFFICE_CONVERTIBLE: [&str; 4] = ["doc", "docx", "ppt", "pptx"];
+
+pub(crate) fn convertible_extensions() -> Vec<&'static str> {
+    CONVERTIBLE.into_iter().chain(OFFICE_CONVERTIBLE).collect()
+}
+
+/// Convert an input supported either by the engine itself or the optional native Office sidecar.
+pub(crate) fn convert_input_to_pdf(session: &pdfcraft_engine::Session, name: &str, bytes: &[u8]) -> Result<Arc<Vec<u8>>, String> {
+    let bytes = Arc::new(bytes.to_vec());
+    match session.convert_to_pdf(name, &bytes) {
+        Ok((_, pdf)) => Ok(pdf),
+        Err(_) if pdfcraft_platform::is_office_document(name) => pdfcraft_platform::office_to_pdf(name, &bytes).map(Arc::new),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// What Create ▸ Clipboard found on the clipboard.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Clip {
@@ -86,14 +102,16 @@ fn stem(name: &str) -> &str {
 }
 
 impl PdfCraftApp {
-    /// Convert a non-PDF file (image, text) into a new tab. Returns `None` when `bytes` is not
+    /// Convert a non-PDF file (image, text, Office document) into a new tab. Returns `None` when `bytes` is not
     /// something Create understands (the caller then tries to open it as a PDF).
     pub(crate) fn open_converted(&mut self, name: &str, bytes: &[u8]) -> Option<Result<(), String>> {
         use pdfcraft_engine::SourceKind;
-        if !matches!(pdfcraft_engine::source_kind(name, bytes), Some(SourceKind::Image | SourceKind::Text)) {
+        if !matches!(pdfcraft_engine::source_kind(name, bytes), Some(SourceKind::Image | SourceKind::Text))
+            && !pdfcraft_platform::is_office_document(name)
+        {
             return None;
         }
-        let created = self.session.convert_to_pdf(name, &Arc::new(bytes.to_vec())).map(|(_, pdf)| pdf);
+        let created = convert_input_to_pdf(&self.session, name, bytes);
         Some(self.open_created_bytes(&format!("{}.pdf", stem(name)), created.map_err(|e| e.to_string())))
     }
 

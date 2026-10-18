@@ -69,8 +69,8 @@ fn files_picker(purpose: FilePurpose) -> rfd::AsyncFileDialog {
     if !matches!(purpose, FilePurpose::CreateMultiple | FilePurpose::CreateMultipleSeparate | FilePurpose::InsertPages | FilePurpose::Combine) {
         return dialog.add_filter("PDF", &["pdf"]);
     }
-    let all: Vec<&str> = std::iter::once("pdf").chain(pdfcraft_engine::CONVERTIBLE).collect();
-    dialog.add_filter(tl!("PDF, images and text"), &all).add_filter("PDF", &["pdf"])
+    let all: Vec<&str> = std::iter::once("pdf").chain(pdfcraft_engine::CONVERTIBLE).chain(crate::create_ui::OFFICE_CONVERTIBLE).collect();
+    dialog.add_filter(tl!("PDF, images, Office and text"), &all).add_filter("PDF", &["pdf"])
 }
 
 /// The Replace Pages dialog: the chosen file and the ranges (1-based, inclusive).

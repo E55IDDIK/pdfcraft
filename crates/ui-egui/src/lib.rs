@@ -1857,20 +1857,24 @@ impl PdfCraftApp {
         }
     }
 
-    /// The File ▸ Open picker: PDFs, and images and text that become PDFs.
+    /// The File ▸ Open picker: PDFs, and images, Office documents and text that become PDFs.
     #[cfg(not(target_arch = "wasm32"))]
     fn open_picker() -> rfd::AsyncFileDialog {
-        rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images and text (converted to PDF)"), &create_ui::CONVERTIBLE)
+        let convertible = create_ui::convertible_extensions();
+        rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images, Office and text (converted to PDF)"), &convertible)
     }
 
     pub fn open_dialog(&mut self) {
         self.startup_superseded = true;
         #[cfg(not(target_arch = "wasm32"))]
-        self.pick(
-            pickers::PickFor::Open,
-            rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images and text (converted to PDF)"), &create_ui::CONVERTIBLE),
-            true,
-        );
+        {
+            let convertible = create_ui::convertible_extensions();
+            self.pick(
+                pickers::PickFor::Open,
+                rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images, Office and text (converted to PDF)"), &convertible),
+                true,
+            );
+        }
         // Browsers pick files asynchronously; the bytes arrive through `inbox`.
         #[cfg(target_arch = "wasm32")]
         {

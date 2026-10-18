@@ -1,4 +1,4 @@
-//! Optional Office-to-PDF conversion through a locally installed LibreOffice process.
+//! Optional Office-to-PDF conversion through Microsoft Office (Windows COM automation) or LibreOffice.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,14 +15,14 @@ pub fn is_office_document(name: &str) -> bool {
     Path::new(name).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| OFFICE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// Convert an Office document using an installed LibreOffice executable.
+/// Convert an Office document using Microsoft Office (Windows) or LibreOffice (other platforms).
 ///
 /// Input and output live in a fresh temporary directory, macros are disabled for the isolated
 /// LibreOffice profile, and both file sizes and process time are bounded. The caller's file is
 /// never modified. This is native-only by design; browser builds do not launch sidecar processes.
 pub fn office_to_pdf(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
     if !is_office_document(name) {
-        return Err(format!("{name}: expected a Word, PowerPoint or OpenDocument file"));
+        return Err(format!("{name}: expected a Word or PowerPoint file"));
     }
     if bytes.is_empty() {
         return Err(format!("{name}: the Office document is empty"));
@@ -66,10 +66,11 @@ pub fn office_to_pdf(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-/// The helper mode runs in a child process so an Office modal dialog or hung COM server can be
-/// terminated without hanging the desktop app or an automation client.
+/// The helper mode runs in a child process inside a Windows Job Object (or process group) so an
+/// Office modal dialog, hung COM server or timeout terminates the entire helper and COM server process tree.
 #[cfg(target_os = "windows")]
 fn run_office_helper(source: &Path, target: &Path) -> Result<(), String> {
+    use command_group::CommandGroup;
     let executable = std::env::current_exe().map_err(|e| format!("couldn't locate the PdfCraft process: {e}"))?;
     let executable_name = executable.file_stem().and_then(|name| name.to_str()).unwrap_or_default();
     if !executable_name.eq_ignore_ascii_case("pdfcraft") && !executable_name.eq_ignore_ascii_case("pdfcraft-cli") {
@@ -82,7 +83,7 @@ fn run_office_helper(source: &Path, target: &Path) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .group_spawn()
         .map_err(|e| format!("couldn't start the Office conversion helper: {e}"))?;
     let status = wait_bounded(&mut child)?;
     if status.success() { Ok(()) } else { Err(format!("Microsoft Office could not convert the document (process exited with {status})")) }
@@ -228,7 +229,38 @@ mod windows_office {
     }
 }
 
-fn wait_bounded(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+trait BoundedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
+}
+
+impl BoundedChild for Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.wait()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl BoundedChild for command_group::GroupChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.wait()
+    }
+}
+
+fn wait_bounded(child: &mut impl BoundedChild) -> Result<std::process::ExitStatus, String> {
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -314,7 +346,16 @@ impl TempWorkspace {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| format!("system clock is invalid: {e}"))?.as_nanos();
         for attempt in 0_u32..32 {
             let path = root.join(format!("pdfcraft-office-{}-{nonce}-{attempt}", std::process::id()));
-            match std::fs::create_dir(&path) {
+            #[cfg(unix)]
+            let builder = {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut b = std::fs::DirBuilder::new();
+                b.mode(0o700);
+                b
+            };
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
+            match builder.create(&path) {
                 Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("couldn't create a temporary Office conversion folder: {e}")),

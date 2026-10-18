@@ -475,16 +475,17 @@ fn app_creator<'a>(
                 app.notify(e);
             }
         } else {
-            if edit {
-                app.set_mode_override(pdfcraft_ui_egui::Mode::Edit);
-            }
             // With the preference on, last session's files come back first; files named on
             // the command line open after them, in front (#442).
             app.reopen_last_files(&files);
-            for f in files {
-                app.open_path(&f);
+            for f in &files {
+                if edit {
+                    app.open_path_in_mode(f, pdfcraft_ui_egui::Mode::Edit);
+                } else {
+                    app.open_path(f);
+                }
             }
-            if edit {
+            if edit && files.is_empty() {
                 app.switch_mode(pdfcraft_ui_egui::Mode::Edit, true);
             }
         }

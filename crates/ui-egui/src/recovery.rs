@@ -318,6 +318,7 @@ impl PdfCraftApp {
                     after_open: None,
                     recovered: Some(meta.clone()),
                     then: None,
+                    mode: None,
                 });
                 if let Err(error) = result {
                     self.notify_fmt("Couldn't recover {name}: {e}", &[("name", &meta.name), ("e", &error)]);

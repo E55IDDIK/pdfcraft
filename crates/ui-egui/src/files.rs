@@ -118,6 +118,7 @@ pub struct FileRequest {
     files: Vec<(String, Vec<u8>)>,
     modified: Vec<Option<std::time::SystemTime>>,
     error: Option<(String, String)>,
+    converted: Vec<Option<Result<Arc<Vec<u8>>, String>>>,
 }
 
 /// Files picked asynchronously (web), waiting to be used.
@@ -289,12 +290,19 @@ impl PdfCraftApp {
             while let Ok(job) = rx.recv() {
                 let mut files = Vec::with_capacity(job.paths.len());
                 let mut modified = Vec::with_capacity(job.paths.len());
+                let mut converted = Vec::with_capacity(job.paths.len());
                 let mut error = None;
                 for path in job.paths {
                     match read_named(&path) {
-                        Ok(file) => {
+                        Ok((name, bytes)) => {
                             modified.push(std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok());
-                            files.push(file);
+                            let converted_pdf = if pdfcraft_platform::is_office_document(&name) {
+                                Some(pdfcraft_platform::office_to_pdf(&name, &bytes).map(Arc::new))
+                            } else {
+                                None
+                            };
+                            converted.push(converted_pdf);
+                            files.push((name, bytes));
                         }
                         Err(problem) => {
                             error = Some(problem);
@@ -303,7 +311,7 @@ impl PdfCraftApp {
                     }
                 }
                 if let Ok(mut queue) = job.requests.lock() {
-                    queue.push(FileRequest { files, modified, error, ..job.request });
+                    queue.push(FileRequest { files, modified, error, converted, ..job.request });
                     if let Some(ctx) = job.ctx {
                         ctx.request_repaint();
                     }
@@ -467,7 +475,14 @@ impl PdfCraftApp {
             let incoming = files
                 .into_iter()
                 .zip(modified)
-                .map(|((name, bytes), modified)| crate::combine_ui::Incoming { name, bytes: Arc::new(bytes), modified, note: None, open_doc: None })
+                .map(|((name, bytes), modified)| crate::combine_ui::Incoming {
+                    name,
+                    bytes: Arc::new(bytes),
+                    converted: None,
+                    modified,
+                    note: None,
+                    open_doc: None,
+                })
                 .collect();
             self.stage_combine_with(incoming);
         } else {
@@ -516,7 +531,7 @@ impl PdfCraftApp {
     /// `requests` once the files are read; it is used on a later frame.
     pub fn file_request(&self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) -> FileRequest {
         let target = if purpose.edits_active_document() { self.pick_target(self.active_ids().map(|(_, id)| id)) } else { None };
-        FileRequest { purpose, target, files, modified: Vec::new(), error: None }
+        FileRequest { purpose, target, files, modified: Vec::new(), error: None, converted: Vec::new() }
     }
 
     /// `doc` as it is now, for a pick that will edit it.
@@ -540,7 +555,7 @@ impl PdfCraftApp {
     /// Handle files picked asynchronously.
     pub(crate) fn process_file_requests(&mut self) {
         let pending: Vec<_> = self.requests.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
-        for FileRequest { purpose, target, files, modified, error } in pending {
+        for FileRequest { purpose, target, files, modified, error, converted } in pending {
             if !self.still_pick_target(target) {
                 continue;
             }
@@ -560,6 +575,7 @@ impl PdfCraftApp {
                             modified: modified.get(index).copied().flatten(),
                             note: None,
                             open_doc: None,
+                            converted: converted.get(index).cloned().flatten(),
                         })
                         .collect();
                     self.stage_combine_with(incoming);

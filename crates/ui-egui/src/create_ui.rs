@@ -52,6 +52,9 @@ pub(crate) fn convertible_extensions() -> Vec<&'static str> {
 
 /// Convert an input supported either by the engine itself or the optional native Office sidecar.
 pub(crate) fn convert_input_to_pdf(session: &pdfcraft_engine::Session, name: &str, bytes: &[u8]) -> Result<Arc<Vec<u8>>, String> {
+    if bytes.starts_with(b"%PDF-") {
+        return Ok(Arc::new(bytes.to_vec()));
+    }
     let bytes = Arc::new(bytes.to_vec());
     match session.convert_to_pdf(name, &bytes) {
         Ok((_, pdf)) => Ok(pdf),
@@ -106,6 +109,9 @@ impl PdfCraftApp {
     /// something Create understands (the caller then tries to open it as a PDF).
     pub(crate) fn open_converted(&mut self, name: &str, bytes: &[u8]) -> Option<Result<(), String>> {
         use pdfcraft_engine::SourceKind;
+        if bytes.starts_with(b"%PDF-") {
+            return Some(self.open_created_bytes(&format!("{}.pdf", stem(name)), Ok(Arc::new(bytes.to_vec()))));
+        }
         if !matches!(pdfcraft_engine::source_kind(name, bytes), Some(SourceKind::Image | SourceKind::Text))
             && !pdfcraft_platform::is_office_document(name)
         {

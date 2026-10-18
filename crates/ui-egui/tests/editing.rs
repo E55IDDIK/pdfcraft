@@ -4913,6 +4913,38 @@ fn os_event_edit_switches_active_tab_to_edit_mode() {
     assert_eq!(h.state().quick_tool, QuickTool::EditText);
 }
 
+#[test]
+fn os_event_edit_path_applies_only_to_requested_file() {
+    use pdfcraft_ui_egui::{Mode, OsEvent};
+    let edit_path = temp_path("os-edit-test-edit.pdf");
+    let normal_path = temp_path("os-edit-test-normal.pdf");
+    std::fs::write(&edit_path, fixture(1)).unwrap();
+    std::fs::write(&normal_path, fixture(1)).unwrap();
+
+    let mut h = harness(1, |_| {});
+    h.state_mut().default_mode = Mode::Read;
+    h.state_mut().switch_mode(Mode::Read, true);
+    assert_eq!(h.state().mode, Mode::Read);
+
+    let edit_str = edit_path.to_string_lossy().into_owned();
+    let queue = std::rc::Rc::new(std::cell::RefCell::new(vec![OsEvent::Edit(vec![edit_str])]));
+    let q = std::rc::Rc::clone(&queue);
+    h.state_mut().os_events = Some(Box::new(move || q.borrow_mut().drain(..).collect()));
+    h.run_steps(6);
+
+    // The file opened by OsEvent::Edit is active and in Edit mode.
+    assert_eq!(h.state().mode, Mode::Edit);
+
+    // A subsequent normal open must open in the default mode, not Edit mode.
+    let normal_str = normal_path.to_string_lossy().into_owned();
+    h.state_mut().open_path(&normal_str);
+    h.run_steps(6);
+    assert_eq!(h.state().mode, Mode::Read);
+
+    let _ = std::fs::remove_file(&edit_path);
+    let _ = std::fs::remove_file(&normal_path);
+}
+
 /// The Read mode command (not the mode bar) applies a paragraph still open in the editor, as
 /// putting the Edit text tool down does; left open, it would stay drawn in Read mode with no tool.
 #[test]

@@ -433,32 +433,35 @@ pub struct PasswordPrompt {
     then: Option<&'static str>,
     /// A link destination to apply after the linked PDF is unlocked.
     after_open: Option<pdfcraft_render::RemoteDestination>,
+    pub mode: Option<Mode>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct PendingOpen {
-    token: u64,
-    receiver: std::sync::mpsc::Receiver<open_worker::ResultMessage>,
-    name: String,
-    path: Option<String>,
-    stamp: Option<file_watch::Stamp>,
-    activate: bool,
-    after_open: Option<pdfcraft_render::RemoteDestination>,
-    recovered: Option<RecoveryMeta>,
-    then: Option<&'static str>,
+pub(crate) struct PendingOpen {
+    pub(crate) token: u64,
+    pub(crate) receiver: std::sync::mpsc::Receiver<open_worker::ResultMessage>,
+    pub(crate) name: String,
+    pub(crate) path: Option<String>,
+    pub(crate) stamp: Option<file_watch::Stamp>,
+    pub(crate) activate: bool,
+    pub(crate) after_open: Option<pdfcraft_render::RemoteDestination>,
+    pub(crate) recovered: Option<RecoveryMeta>,
+    pub(crate) then: Option<&'static str>,
+    pub(crate) mode: Option<Mode>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct OpenRequest {
-    name: String,
-    path: Option<String>,
-    stamp: Option<file_watch::Stamp>,
-    input: open_worker::Input,
-    password: Option<String>,
-    activate: bool,
-    after_open: Option<pdfcraft_render::RemoteDestination>,
-    recovered: Option<RecoveryMeta>,
-    then: Option<&'static str>,
+pub(crate) struct OpenRequest {
+    pub(crate) name: String,
+    pub(crate) path: Option<String>,
+    pub(crate) stamp: Option<file_watch::Stamp>,
+    pub(crate) input: open_worker::Input,
+    pub(crate) password: Option<String>,
+    pub(crate) activate: bool,
+    pub(crate) after_open: Option<pdfcraft_render::RemoteDestination>,
+    pub(crate) recovered: Option<RecoveryMeta>,
+    pub(crate) then: Option<&'static str>,
+    pub(crate) mode: Option<Mode>,
 }
 
 /// Asks for the permissions password of an open document whose security restricts it, which
@@ -1187,6 +1190,7 @@ impl PdfCraftApp {
             after_open: request.after_open,
             recovered: request.recovered,
             then: request.then,
+            mode: request.mode,
         });
         Ok(token)
     }
@@ -1236,6 +1240,9 @@ impl PdfCraftApp {
             }
             open_worker::ResultKind::Conversion(bytes) => match self.open_converted(&pending.name, &bytes) {
                 Some(Ok(())) => {
+                    if let Some(mode) = pending.mode {
+                        self.switch_mode(mode, true);
+                    }
                     if let Some(command) = pending.then {
                         self.execute(command);
                     }
@@ -1254,6 +1261,9 @@ impl PdfCraftApp {
                         }
                         if let Some(meta) = &pending.recovered {
                             self.finish_recovery(meta);
+                        }
+                        if let Some(mode) = pending.mode {
+                            self.switch_mode(mode, true);
                         }
                         if let Some(command) = pending.then {
                             self.execute(command);
@@ -1275,6 +1285,7 @@ impl PdfCraftApp {
                         recovered: pending.recovered,
                         then: pending.then,
                         after_open: pending.after_open,
+                        mode: pending.mode,
                     });
                 }
                 Err(error) => self.notify_fmt("Couldn't open {name}: {e}", &[("name", &pending.name), ("e", &error.to_string())]),
@@ -1309,6 +1320,7 @@ impl PdfCraftApp {
                     recovered: None,
                     then: None,
                     after_open: None,
+                    mode: None,
                 });
                 return Ok(());
             }
@@ -1416,6 +1428,7 @@ impl PdfCraftApp {
                         after_open: None,
                         recovered: None,
                         then: None,
+                        mode: None,
                     });
                     if let Err(error) = result {
                         self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &error)]);
@@ -1632,6 +1645,7 @@ impl PdfCraftApp {
                 after_open: p.after_open.clone(),
                 recovered: p.recovered.clone(),
                 then: p.then,
+                mode: p.mode,
             });
             if let Err(error) = result {
                 let mut prompt = p;
@@ -1663,6 +1677,9 @@ impl PdfCraftApp {
                 if let Some(meta) = &p.recovered {
                     self.finish_recovery(meta);
                 }
+                if let Some(mode) = p.mode {
+                    self.switch_mode(mode, true);
+                }
                 if let Some(command) = p.then {
                     self.execute(command);
                 }
@@ -1674,6 +1691,7 @@ impl PdfCraftApp {
                     prompt.recovered = p.recovered;
                     prompt.then = p.then;
                     prompt.after_open = after_open;
+                    prompt.mode = p.mode;
                 }
             }
         }
@@ -1771,6 +1789,7 @@ impl PdfCraftApp {
             after_open: Some(destination),
             recovered: None,
             then: None,
+            mode: None,
         });
         if let Err(error) = result {
             self.notify_fmt("Couldn't follow linked PDF: {reason}", &[("reason", &error)]);
@@ -1812,16 +1831,30 @@ impl PdfCraftApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: &str) {
-        self.open_path_then(path, None);
+        self.open_path_then_mode(path, None, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_path_in_mode(&mut self, path: &str, mode: Mode) {
+        self.open_path_then_mode(path, None, Some(mode));
     }
 
     /// Keep a chosen tool with its file until preparation and any password entry finish.
     #[cfg(not(target_arch = "wasm32"))]
     fn open_path_then(&mut self, path: &str, then: Option<&'static str>) {
+        self.open_path_then_mode(path, then, None);
+    }
+
+    /// Keep a chosen tool or mode with its file until preparation and any password entry finish.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_path_then_mode(&mut self, path: &str, then: Option<&'static str>, mode: Option<Mode>) {
         // One file, one tab (#2166): a file that is open already comes to the front instead,
         // and the tool it was opened for runs on it. One still being opened is left to that.
         if let Some(i) = self.tab_showing(path) {
             self.active = Some(i);
+            if let Some(m) = mode {
+                self.switch_mode(m, true);
+            }
             if let Some(command) = then {
                 self.execute(command);
             }
@@ -1844,9 +1877,13 @@ impl PdfCraftApp {
                         self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &error)]);
                     } else if let Some(prompt) = self.password_prompt.as_mut().filter(|p| p.path.as_deref() == Some(path)) {
                         prompt.then = then;
+                        prompt.mode = mode;
                     } else if self.views.len() > before {
                         if let Some(doc) = self.views.last().map(|view| view.id) {
                             self.watch.known_as(doc, stamp);
+                        }
+                        if let Some(m) = mode {
+                            self.switch_mode(m, true);
                         }
                         if let Some(command) = then {
                             self.execute(command);
@@ -1868,6 +1905,7 @@ impl PdfCraftApp {
             after_open: None,
             recovered: None,
             then,
+            mode,
         }) {
             self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &error)]);
         }
@@ -3087,9 +3125,11 @@ impl eframe::App for PdfCraftApp {
                 OsEvent::Open(_) => {}
                 #[cfg(not(target_arch = "wasm32"))]
                 OsEvent::Edit(paths) => {
-                    self.set_mode_override(Mode::Edit);
-                    paths.iter().for_each(|p| self.open_path(p));
-                    self.switch_mode(Mode::Edit, true);
+                    if paths.is_empty() {
+                        self.switch_mode(Mode::Edit, true);
+                    } else {
+                        paths.iter().for_each(|p| self.open_path_in_mode(p, Mode::Edit));
+                    }
                 }
                 #[cfg(target_arch = "wasm32")]
                 OsEvent::Edit(_) => {}

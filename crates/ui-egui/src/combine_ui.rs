@@ -382,6 +382,8 @@ pub(crate) struct Incoming {
     pub note: Option<String>,
     /// The open document it is, when it came from a tab.
     pub open_doc: Option<pdfcraft_engine::DocId>,
+    /// The converted PDF bytes if already converted off the UI thread.
+    pub converted: Option<Result<Arc<Vec<u8>>, String>>,
 }
 
 /// A new value for [`CombineFile::auth`]: counted for the whole run, outside the undo history.
@@ -2388,15 +2390,17 @@ impl PdfCraftApp {
 
     /// Add picked files to the Combine files list (and show it).
     pub(crate) fn stage_combine(&mut self, files: Vec<(String, Vec<u8>)>) {
-        let incoming =
-            files.into_iter().map(|(name, bytes)| Incoming { name, bytes: Arc::new(bytes), modified: None, note: None, open_doc: None }).collect();
+        let incoming = files
+            .into_iter()
+            .map(|(name, bytes)| Incoming { name, bytes: Arc::new(bytes), modified: None, note: None, open_doc: None, converted: None })
+            .collect();
         self.stage_combine_with(incoming);
     }
 
     /// Add files to the Combine files list, with what can be known about them up front.
     pub(crate) fn stage_combine_with(&mut self, files: Vec<Incoming>) {
         let mut added = Vec::new();
-        for Incoming { name, bytes, modified, note, open_doc } in files {
+        for Incoming { name, bytes, modified, note, open_doc, converted } in files {
             // Images and text files become PDFs as they join the list (#569): from then on they
             // are ordinary files, with pages, thumbnails and page ranges.
             // A file that can't be read joins the list all the same, with why (the Warnings
@@ -2409,7 +2413,9 @@ impl PdfCraftApp {
                 notes: Vec::new(),
             };
             let source = bytes.clone();
-            let converted = if pdfcraft_platform::is_office_document(&name) {
+            let converted = if let Some(pdf) = converted {
+                pdf.map_err(pdfcraft_engine::EditError::Source)
+            } else if pdfcraft_platform::is_office_document(&name) {
                 crate::create_ui::convert_input_to_pdf(&self.session, &name, &bytes).map_err(pdfcraft_engine::EditError::Source)
             } else {
                 self.session.as_pdf(&name, &bytes)
@@ -2567,7 +2573,7 @@ impl PdfCraftApp {
             let modified = None;
             let note = doc.dirty.then(|| tl!("Includes unsaved changes").to_string());
             let name = if doc.name.to_ascii_lowercase().ends_with(".pdf") { doc.name.clone() } else { format!("{}.pdf", doc.name) };
-            incoming.push(Incoming { name, bytes: doc.bytes.clone(), modified, note, open_doc: Some(doc.id) });
+            incoming.push(Incoming { name, bytes: doc.bytes.clone(), converted: None, modified, note, open_doc: Some(doc.id) });
         }
         self.stage_combine_with(incoming);
     }

@@ -116,6 +116,8 @@ pub struct FileRequest {
     purpose: FilePurpose,
     target: Option<PickTarget>,
     files: Vec<(String, Vec<u8>)>,
+    modified: Vec<Option<std::time::SystemTime>>,
+    error: Option<(String, String)>,
 }
 
 /// Files picked asynchronously (web), waiting to be used.
@@ -333,6 +335,41 @@ impl PdfCraftApp {
     /// Read the picked files and use them.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn use_paths(&mut self, purpose: FilePurpose, paths: &[std::path::PathBuf]) {
+        if purpose == FilePurpose::Combine {
+            if paths.is_empty() {
+                return;
+            }
+            let paths = paths.to_vec();
+            let requests = self.requests.clone();
+            let ctx = self.ctx.clone();
+            let request = self.file_request(purpose, Vec::new());
+            if let Err(e) = std::thread::Builder::new().name("pdfcraft-combine-read".into()).spawn(move || {
+                let mut files = Vec::with_capacity(paths.len());
+                let mut modified = Vec::with_capacity(paths.len());
+                let mut error = None;
+                for path in paths {
+                    match read_named(&path) {
+                        Ok(file) => {
+                            modified.push(std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok());
+                            files.push(file);
+                        }
+                        Err(problem) => {
+                            error = Some(problem);
+                            break;
+                        }
+                    }
+                }
+                if let Ok(mut queue) = requests.lock() {
+                    queue.push(FileRequest { files, modified, error, ..request });
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            }) {
+                self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
+            }
+            return;
+        }
         if purpose == FilePurpose::CreateMultiple {
             // Each file is read when its turn comes, so the selection's bytes are not all held at once.
             if !paths.is_empty() {
@@ -443,7 +480,7 @@ impl PdfCraftApp {
     /// `requests` once the files are read; it is used on a later frame.
     pub fn file_request(&self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) -> FileRequest {
         let target = if purpose.edits_active_document() { self.pick_target(self.active_ids().map(|(_, id)| id)) } else { None };
-        FileRequest { purpose, target, files }
+        FileRequest { purpose, target, files, modified: Vec::new(), error: None }
     }
 
     /// `doc` as it is now, for a pick that will edit it.
@@ -467,12 +504,34 @@ impl PdfCraftApp {
     /// Handle files picked asynchronously.
     pub(crate) fn process_file_requests(&mut self) {
         let pending: Vec<_> = self.requests.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
-        for FileRequest { purpose, target, files } in pending {
+        for FileRequest { purpose, target, files, modified, error } in pending {
             if !self.still_pick_target(target) {
                 continue;
             }
+            if let Some((name, e)) = error {
+                self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &e)]);
+                continue;
+            }
             // Last-resort guard (AGENTS.md §4), as for desktop picks and commands.
-            if let Err(m) = pdfcraft_engine::guard(|| self.use_files(purpose, files)) {
+            let use_request = || {
+                if purpose == FilePurpose::Combine {
+                    let incoming = files
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (name, bytes))| crate::combine_ui::Incoming {
+                            name,
+                            bytes: Arc::new(bytes),
+                            modified: modified.get(index).copied().flatten(),
+                            note: None,
+                            open_doc: None,
+                        })
+                        .collect();
+                    self.stage_combine_with(incoming);
+                } else {
+                    self.use_files(purpose, files);
+                }
+            };
+            if let Err(m) = pdfcraft_engine::guard(use_request) {
                 self.notify_fmt("That didn't work: an internal error stopped it ({m}).", &[("m", m.as_str())]);
             }
         }

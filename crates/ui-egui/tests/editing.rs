@@ -1080,9 +1080,15 @@ fn external_combine_paths_are_staged_in_received_order_and_focus_the_combine_tab
     std::fs::write(&first, fixture(2)).unwrap();
     let paths = vec![second.to_string_lossy().into_owned(), first.to_string_lossy().into_owned()];
     let staged = paths.clone();
-    let h = harness(1, move |app| app.add_paths_to_combine(&staged));
+    let mut h = harness(1, move |app| app.add_paths_to_combine(&staged));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while h.state().combine_draft.len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run_steps(1);
+    }
     assert!(h.state().combine_showing());
     assert_eq!(h.state().combine_draft.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["z Plan.pdf", "a résumé.pdf"]);
+    assert!(h.state().combine_draft.iter().all(|file| file.modified.is_some()));
     drop(h);
     std::fs::remove_dir_all(dir).unwrap();
 }

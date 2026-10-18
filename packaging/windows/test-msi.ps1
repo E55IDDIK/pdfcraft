@@ -201,7 +201,7 @@ foreach ($ext in @('doc', 'docx', 'ppt', 'pptx')) {
   Assert-Equal $command[0] '"[#PdfcraftExe]" "%1"' "$ext context menu command"
   Assert-Equal $command[1] 'PdfcraftImageContextMenu' "$ext context menu command component"
   $selection = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` = ''MultiSelectModel''') 2
-  Assert-Equal $selection[0] 'Document' "$ext context menu selection"
+  Assert-Equal $selection[0] 'Single' "$ext context menu selection"
   Assert-Equal $selection[1] 'PdfcraftImageContextMenu' "$ext context menu selection component"
 }
 $view = $Database.OpenView('SELECT `Key` FROM `Registry` WHERE `Component_` = ''PdfcraftApp''')

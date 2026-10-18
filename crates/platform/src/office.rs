@@ -131,8 +131,18 @@ mod windows_office {
     use winsafe::{self as w, co, prelude::*};
 
     pub(super) fn convert(source: &Path, target: &Path) -> Result<(), String> {
-        let source = source.to_str().ok_or_else(|| "the staged Office path is not Unicode".to_string())?;
-        let target = target.to_str().ok_or_else(|| "the staged PDF path is not Unicode".to_string())?;
+        let abs_source = if source.is_relative() {
+            std::env::current_dir().map(|d| d.join(source)).unwrap_or_else(|_| source.to_path_buf())
+        } else {
+            source.to_path_buf()
+        };
+        let abs_target = if target.is_relative() {
+            std::env::current_dir().map(|d| d.join(target)).unwrap_or_else(|_| target.to_path_buf())
+        } else {
+            target.to_path_buf()
+        };
+        let source = abs_source.to_str().ok_or_else(|| "the staged Office path is not Unicode".to_string())?;
+        let target = abs_target.to_str().ok_or_else(|| "the staged PDF path is not Unicode".to_string())?;
         let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE)
             .map_err(|e| format!("couldn't initialize Office automation: {e}"))?;
         let is_word = source.to_ascii_lowercase().ends_with(".doc") || source.to_ascii_lowercase().ends_with(".docx");
@@ -191,11 +201,10 @@ mod windows_office {
                 .map_err(|e| format!("PowerPoint couldn't open the presentation: {e}"))?
                 .into_dispatch("PowerPoint returned an invalid presentation object")?;
             let out = w::Variant::from_str(target);
-            let pdf = w::Variant::I4(2); // ppFixedFormatTypePDF
-            let exported =
-                presentation.invoke_method("ExportAsFixedFormat", &[&out, &pdf]).map_err(|e| format!("PowerPoint couldn't export PDF: {e}"));
+            let pdf = w::Variant::I4(32); // ppSaveAsPDF = 32
+            let saved = presentation.invoke_method("SaveAs", &[&out, &pdf]).map_err(|e| format!("PowerPoint couldn't save PDF: {e}"));
             let _ = presentation.invoke_method("Close", &[]);
-            exported.map(|_| ())
+            saved.map(|_| ())
         })();
         let _ = app.invoke_method("Quit", &[]);
         result

@@ -83,6 +83,9 @@ help and feedback: https://discord.gg/artcraft"
 );
 
 fn main() -> ExitCode {
+    if office_helper_mode() {
+        return ExitCode::SUCCESS;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `<command> --help` too; only right after the command, so a later `-h` (a value) still reaches it.
     let command = match args.get(1).map(String::as_str) {
@@ -119,6 +122,25 @@ fn main() -> ExitCode {
         Err(e) => {
             let _ = writeln!(std::io::stderr().lock(), "pdfcraft-cli: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Private subprocess entry point used to isolate potentially blocking Office COM automation.
+fn office_helper_mode() -> bool {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|arg| arg != "--pdfcraft-office-convert") {
+        return false;
+    }
+    let result = match (args.get(1), args.get(2), args.get(3)) {
+        (Some(source), Some(target), None) => pdfcraft_platform::office_to_pdf_internal(Path::new(source), Path::new(target)),
+        _ => Err("invalid internal Office conversion arguments".into()),
+    };
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr().lock(), "pdfcraft-cli Office conversion: {error}");
+            std::process::exit(1);
         }
     }
 }

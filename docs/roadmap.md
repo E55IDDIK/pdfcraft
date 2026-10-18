@@ -61,7 +61,7 @@ exchange with Acrobat users or a missing sub-case is `partial, not blocking` (a 
 | Comment and review | yes | Every markup type with appearances, replies, status, XFDF/FDF; comments saved in the PDF reopen in other readers; XFDF keeps polygon vertices and callouts (#809, #819) | 0 |
 | Fill and sign forms | yes | All AcroForm field types, Acrobat's AF functions, Fill & Sign, PAdES signatures validated with `pdfsig`/OpenSSL | 0 |
 | Edit text and images | partial, not blocking | Editing a paragraph of Latin text works (embedded font reused, else Helvetica substituted, rewrapped); added text and images stay editable. Several objects on one page move together (#844), not across pages. Fails for CJK/RTL (#766); a beta item (gap 3) | 0 (beta: 100–180) |
-| Convert and share (Office ↔ PDF, password protection) | partial, not blocking | PDFs we save open in Acrobat and other readers (958-file corpus round trip, `qpdf --check`), password-protected ones too since #836 (#774: Acrobat DC opens AES-256 and RC4-128 output); export to Word, RTF, HTML, text and images works, lossily (#773: an invoice's layout lost in Word); Create PDF works from images, text, the clipboard and many files at once. Missing sub-cases: an in-app Create PDF from Office (Office on macOS saves PDF itself), Excel/PowerPoint export. Beta items (gap 8) | 0 (beta: 32–55 for Office→PDF and a layout-keeping Word export) |
+| Convert and share (Office ↔ PDF, password protection) | partial, not blocking | PDFs we save open in Acrobat and other readers (958-file corpus round trip, `qpdf --check`), password-protected ones too since #836 (#774: Acrobat DC opens AES-256 and RC4-128 output); export to Word, RTF, HTML, text and images works, lossily (#773: an invoice's layout lost in Word); Create PDF works from images, text, the clipboard, multiple files and (with a local suite) Word/PowerPoint. Excel/PowerPoint export and CI validation of Office conversion remain open. Beta items (gap 8) | 0 (beta: 32–55 for Office conversion validation and a layout-keeping Word export) |
 
 **Result: alpha.** Every core workflow can be completed on macOS; two are lossy or missing sub-cases
 (editing CJK/RTL text; Office→PDF, Word layout), which are the
@@ -183,6 +183,7 @@ M2 (renderer), M7 (content editing), M10 (OCR and Office), M11 (Preflight and st
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | M10: Windows Explorer image Create PDF supports multi-select; Word/PowerPoint import uses installed Microsoft Office on Windows and LibreOffice on macOS/Linux. Sidecar conversion is bounded and not yet exercised in CI. Estimates unchanged. |
 | 2026-10-15 | minor | M6: Plain AcroForm XML imports retain all direct text around comments and processing instructions, including CDATA and character references. Estimates unchanged. |
 | 2026-10-13 | minor | M6: XML/XFDF attribute whitespace survives form and comment export/import; estimates unchanged |
 | 2026-10-14 | minor | M1: raw-deflate fallback preserves decoding-limit errors in strict and tolerant decoding; synthetic filter and COS stream regressions. Estimates unchanged. |

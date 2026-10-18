@@ -178,6 +178,12 @@ fn prepare(job: Job) -> ResultKind {
     if matches!(pdfcraft_engine::source_kind(&job.name, &bytes), Some(SourceKind::Image | SourceKind::Text)) {
         return ResultKind::Conversion(bytes);
     }
+    if pdfcraft_platform::is_office_document(&job.name) {
+        return match pdfcraft_platform::office_to_pdf(&job.name, &bytes) {
+            Ok(pdf) => ResultKind::Conversion(Arc::new(pdf)),
+            Err(error) => ResultKind::Failed(error),
+        };
+    }
     let result = job.context.prepare_open(job.name, job.path, bytes.clone(), job.password.as_deref());
     ResultKind::Prepared { bytes, result: Box::new(result) }
 }

@@ -68,7 +68,8 @@ features total).
 | Plain text | yes | yes | good | `create.from-text` |
 | Clipboard (image or text) | yes | yes | good | `create.from-clipboard` |
 | Screenshot | yes | no | none | `create.from-screenshot` planned |
-| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | no | none | `create.from-office` planned (LibreOffice sidecar) |
+| Word and PowerPoint | yes | partial | local Office suite | `create.from-office` partial: Microsoft Office COM on Windows; LibreOffice on macOS/Linux; actual office rendering is not covered in CI |
+| Excel, Visio, Publisher | yes | no | none | planned |
 | HTML file, web page URL | yes | no | none | `create.from-html`, `create.from-web-page` planned |
 | RTF | yes | no | none | |
 | PostScript / EPS (Distiller) | yes | no | none | `create.distiller` planned (P3) |

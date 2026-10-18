@@ -6901,15 +6901,15 @@ notes = ""
 
 [[feature]]
 id = "create.from-office"
-title = "Create PDF from Office documents (LibreOffice sidecar)"
+title = "Create PDF from Word and PowerPoint documents (local Office sidecar)"
 area = "J"
 tier = "P2"
 milestone = "M10"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "partial"
+commands = ["create.multiple"]
+tools = ["doc_create_multiple"]
+evidence = ["crates/platform/src/office.rs::office_extensions_are_case_insensitive_and_bounded", "crates/automation/tests/automation.rs::creating_from_multiple_files_through_tools"]
+notes = "Word (.doc/.docx) and PowerPoint (.ppt/.pptx) are converted through installed Microsoft Office on Windows (Word/PowerPoint COM export) and LibreOffice on macOS/Linux. The Windows conversion runs in a bounded child process with macros disabled; the caller's source is never modified. Requires the matching desktop suite to be installed. Actual Word/PowerPoint/LibreOffice rendering is not exercised in CI, so this remains partial; no Excel, Visio, Publisher or OpenDocument conversion."
 
 [[feature]]
 id = "create.create-multiple"
@@ -6921,7 +6921,7 @@ status = "shipped"
 commands = ["create.multiple"]
 tools = ["doc_create_multiple"]
 evidence = ["crates/engine/src/tests.rs::mixed_files_convert_and_combine_in_order", "crates/engine/src/tests.rs::files_that_cannot_be_converted_are_refused_clearly", "crates/automation/tests/automation.rs::creating_from_multiple_files_through_tools", "crates/ui-egui/tests/create.rs::multiple_files_open_as_one_document_in_the_page_grid", "crates/ui-egui/tests/editing.rs::plus_between_pages_inserts_picked_files_there_in_order", "crates/ui-egui/tests/editing.rs::save_pages_writes_what_the_grid_shows"]
-notes = "Create ▸ Multiple files: the picked PDFs, images (PNG, JPEG, JPEG 2000, TIFF, GIF, BMP) and .txt files open as one unsaved document in the page grid, in the order picked (a bookmark per file); there pages are removed, reordered, more files inserted at any gap (a + button, or dropped there), and Save pages writes what is shown. One PDF per file is offered by the doc_create_multiple tool only (mode separate), not in the app. Missing: Office, HTML and Markdown inputs, PDF Portfolio output, per-file image resolution choice, progress and cancel for large batches (conversion runs on the UI thread). The combined file has combine's limits: untagged, no page labels or document info carried over, and its per-file bookmarks are not updated when pages are later moved between files."
+notes = "Create ▸ Multiple files: the picked PDFs, images (PNG, JPEG, JPEG 2000, TIFF, GIF, BMP), .txt and supported Word/PowerPoint files open as one unsaved document in the page grid, in the order picked (a bookmark per file); Office inputs require installed Microsoft Office on Windows or LibreOffice on macOS/Linux. One PDF per file is offered by the doc_create_multiple tool only (mode separate), not in the app. Missing: HTML and Markdown inputs, PDF Portfolio output, per-file image resolution choice, progress and cancel for large batches (conversion runs on the UI thread). The combined file has combine's limits: untagged, no page labels or document info carried over, and its per-file bookmarks are not updated when pages are later moved between files. Office rendering is not yet validated in CI."
 
 [[feature]]
 id = "create.image-conversion-options"

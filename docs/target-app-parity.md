@@ -227,8 +227,9 @@ six everyday workflows can be completed end to end on macOS. Under the gate rule
 Crafting Apps, a workflow blocks only when a typical user can't complete it at all; lossy exchange
 or a missing sub-case is a beta item. **Converting and sharing** is therefore partial, not
 blocking: PDFs we save open everywhere, password-protected ones included since #836 (#774), and
-export to Word, RTF, HTML, text and images works, but there is no in-app
-Create PDF from Office, and Word export loses layout (#773). The gate table, with evidence, is in
+export to Word, RTF, HTML, text and images works; Word/PowerPoint import now uses an installed suite
+(Microsoft Office on Windows, LibreOffice on macOS/Linux), while conversion fidelity is not yet
+validated in CI. Word export still loses layout (#773). The gate table, with evidence, is in
 [roadmap.md](roadmap.md#alpha-gate). (Earlier the same day this row was judged blocking and the
 stage set to pre-alpha; see the revision history.)
 

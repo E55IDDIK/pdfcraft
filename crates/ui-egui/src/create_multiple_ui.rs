@@ -1,11 +1,9 @@
 //! Create a PDF from multiple files. Combine opens one unsaved document in the page grid;
 //! Separate writes one PDF per convertible source without opening tabs.
 
+use pdfcraft_engine::{EditError, SourceKind};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-
-use pdfcraft_engine::{EditError, SourceKind};
 
 use crate::PdfCraftApp;
 
@@ -43,17 +41,18 @@ impl PdfCraftApp {
                     continue;
                 }
             };
-            let (kind, pdf) = match self.session.convert_to_pdf(&name, &Arc::new(bytes)) {
-                Ok(converted) => converted,
+            let kind = pdfcraft_engine::source_kind(&name, &bytes);
+            if kind == Some(SourceKind::Pdf) {
+                refused.push(format!("{name} ({})", tl!("already a PDF")));
+                continue;
+            }
+            let pdf = match crate::create_ui::convert_input_to_pdf(&self.session, &name, &bytes) {
+                Ok(pdf) => pdf,
                 Err(error) => {
                     refused.push(format!("{name} ({error})"));
                     continue;
                 }
             };
-            if kind == SourceKind::Pdf {
-                refused.push(format!("{name} ({})", tl!("already a PDF")));
-                continue;
-            }
             let base = crate::files::file_stem_from_user(stem(&name));
             let base = if base.is_empty() { "document" } else { &base };
             let mut output = None;
@@ -111,8 +110,8 @@ impl PdfCraftApp {
         let sources = std::iter::from_fn(|| {
             loop {
                 match files.next()? {
-                    Ok((name, bytes)) => match session.convert_to_pdf(&name, &Arc::new(bytes)) {
-                        Ok((_, pdf)) => {
+                    Ok((name, bytes)) => match crate::create_ui::convert_input_to_pdf(session, &name, &bytes) {
+                        Ok(pdf) => {
                             converted += 1;
                             return Some(Ok((stem(&name).to_string(), pdf, None)));
                         }

@@ -185,11 +185,22 @@ foreach ($ext in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'jp2', 'j2
   Assert-Equal $menu[1] 'PdfcraftImageContextMenu' "$ext context menu component"
   Assert-Equal $menu[2] '2' "$ext context menu HKLM root"
   $command = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + '\command''') 2
-  Assert-Equal $command[0] '"[#PdfcraftExe]" --create-images "%1"' "$ext context menu command"
+  Assert-Equal $command[0] '"[#PdfcraftExe]" --create-images %*' "$ext context menu command"
   Assert-Equal $command[1] 'PdfcraftImageContextMenu' "$ext context menu command component"
   $selection = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` = ''MultiSelectModel''') 2
-  Assert-Equal $selection[0] 'Single' "$ext context menu selection"
+  Assert-Equal $selection[0] 'Player' "$ext context menu selection"
   Assert-Equal $selection[1] 'PdfcraftImageContextMenu' "$ext context menu selection component"
+}
+foreach ($ext in @('doc', 'docx', 'ppt', 'pptx')) {
+  $key = 'Software\Classes\SystemFileAssociations\.' + $ext + '\shell\PdfCraft.CreatePdf'
+  $menu = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` IS NULL') 2
+  Assert-Equal $menu[0] 'Create PDF with PdfCraft…' "$ext context menu label"
+  Assert-Equal $menu[1] 'PdfcraftImageContextMenu' "$ext context menu component"
+  $command = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + '\command''') 2
+  Assert-Equal $command[0] '"[#PdfcraftExe]" %*' "$ext context menu command"
+  Assert-Equal $command[1] 'PdfcraftImageContextMenu' "$ext context menu command component"
+  $selection = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $key + ''' AND `Name` = ''MultiSelectModel''') 2
+  Assert-Equal $selection[0] 'Player' "$ext context menu selection"
 }
 $view = $Database.OpenView('SELECT `Key` FROM `Registry` WHERE `Component_` = ''PdfcraftApp''')
 try {

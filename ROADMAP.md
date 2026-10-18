@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (M6: AcroForm XML text; estimates unchanged)
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** minor (M10: Word/PowerPoint import via installed Office on Windows / LibreOffice elsewhere; image Explorer verb supports multi-select; estimates unchanged)
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (M2/gap 12: the Annex D.2 alias codes read as the ink they draw in both tables; the text oracle scores reading order; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (M6: preserve XML/XFDF attribute whitespace; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (M1: raw-deflate fallback preserves decoding-limit errors; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -67,7 +67,7 @@ and add a line to the [progress log](#progress-log); when a gap closes, remove i
 **Why alpha:** all six of Acrobat Pro's everyday workflows can be completed end to end on macOS
 (the [alpha gate](docs/roadmap.md#alpha-gate)), and users praise them (7.6k stars, ≈ 217k downloads
 of 0.4–0.5, switching reports such as #179). Two are only partial: editing (no CJK/RTL) and convert
-and share (no in-app Office→PDF; Word export loses layout, #773; password-protected files open in
+and share (Office→PDF uses an installed suite; Word export loses layout, #773; password-protected files open in
 Acrobat since #836, #774). Those, unmeasured quality against Acrobat, the borrowed `hayro` renderer,
 and 245 open issues keep it far from beta.
 

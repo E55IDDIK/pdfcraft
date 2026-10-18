@@ -81,6 +81,16 @@ fn failed(e: impl std::fmt::Display) -> ToolError {
     ToolError::Failed(e.to_string())
 }
 
+fn convert_input(session: &Session, name: &str, bytes: &Arc<Vec<u8>>) -> Result<(Option<pdfcraft_engine::SourceKind>, Arc<Vec<u8>>)> {
+    if let Some(kind) = pdfcraft_engine::source_kind(name, bytes) {
+        return session.convert_to_pdf(name, bytes).map(|(_, pdf)| (Some(kind), pdf)).map_err(failed);
+    }
+    if pdfcraft_platform::is_office_document(name) {
+        return pdfcraft_platform::office_to_pdf(name, bytes).map(Arc::new).map(|pdf| (None, pdf)).map_err(failed);
+    }
+    session.convert_to_pdf(name, bytes).map(|(kind, pdf)| (Some(kind), pdf)).map_err(failed)
+}
+
 impl From<pdfcraft_engine::EditError> for ToolError {
     fn from(e: pdfcraft_engine::EditError) -> Self {
         failed(e)
@@ -1551,7 +1561,7 @@ impl Automation {
             let path = self.resolve(p, false)?;
             let bytes = std::fs::read(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?;
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let (_, pdf) = self.session.convert_to_pdf(&name, &Arc::new(bytes)).map_err(failed)?;
+            let (_, pdf) = convert_input(&self.session, &name, &Arc::new(bytes))?;
             let title = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             Ok((title, pdf, range))
         });
@@ -1569,11 +1579,11 @@ impl Automation {
                 let bytes = std::fs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
                 let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let stem = src.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
-                let (kind, pdf) = self.session.convert_to_pdf(&name, &Arc::new(bytes)).map_err(|e| e.to_string())?;
+                let (kind, pdf) = convert_input(&self.session, &name, &Arc::new(bytes)).map_err(|e| e.to_string())?;
                 Ok((kind, stem, pdf))
             });
             out.push(match converted {
-                Ok((pdfcraft_engine::SourceKind::Pdf, ..)) => json!({ "path": p, "skipped": "already a PDF" }),
+                Ok((Some(pdfcraft_engine::SourceKind::Pdf), ..)) => json!({ "path": p, "skipped": "already a PDF" }),
                 Ok((_, stem, pdf)) => {
                     let target = unused(&dir, &stem);
                     write_atomic(&target, &pdf)?;

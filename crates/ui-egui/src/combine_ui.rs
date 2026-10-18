@@ -2409,7 +2409,12 @@ impl PdfCraftApp {
                 notes: Vec::new(),
             };
             let source = bytes.clone();
-            let (bytes, assessed) = match self.session.as_pdf(&name, &bytes) {
+            let converted = if pdfcraft_platform::is_office_document(&name) {
+                crate::create_ui::convert_input_to_pdf(&self.session, &name, &bytes).map_err(pdfcraft_engine::EditError::Source)
+            } else {
+                self.session.as_pdf(&name, &bytes)
+            };
+            let (bytes, assessed) = match converted {
                 Ok(pdf) => {
                     let assessed = assess(&pdf, None);
                     (pdf, assessed)

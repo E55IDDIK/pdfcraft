@@ -293,6 +293,13 @@ impl Automation {
                 let to = self.position(&a, "to")?;
                 self.apply(&a, Edit::MovePages { pages, to })?
             }
+            "page_reverse" => {
+                let pages = match a.opt_ints("pages")? {
+                    Some(_) => self.pages(&a, "pages")?,
+                    None => (0..self.doc(&a)?.info.pages.len()).collect(),
+                };
+                self.apply(&a, Edit::ReversePages { pages })?
+            }
             "page_insert_blank" => self.insert_blank(&a)?,
             "page_insert_file" => self.insert_file(&a)?,
             "page_extract" => self.page_extract(&a)?,
@@ -383,7 +390,8 @@ impl Automation {
             }
             "page_duplicate" => {
                 let pages = self.pages(&a, "pages")?;
-                self.apply(&a, Edit::DuplicatePages { pages })?
+                let at = self.opt_position(&a, "at")?;
+                self.apply(&a, Edit::DuplicatePages { pages, at })?
             }
             "page_set_box" => self.page_set_box(&a)?,
             "page_transition_set" => self.page_transition_set(&a)?,
@@ -1756,16 +1764,21 @@ impl Automation {
         let mut used = std::collections::HashSet::new();
         for (i, (first, last, bytes)) in parts.iter().enumerate() {
             let safe = |t: &str| t.chars().map(|c| if c.is_alphanumeric() || " -_.,()".contains(c) { c } else { '_' }).collect::<String>();
-            let file = match titles.iter().find(|t| t.0 + 1 == *first) {
-                Some((_, t)) => format!("{stem}-{}.pdf", safe(t)),
-                None => format!("{stem}-part{}.pdf", i + 1),
+            let mut base = match titles.iter().find(|t| t.0 + 1 == *first) {
+                Some((_, t)) => format!("{stem}-{}", safe(t)),
+                None => format!("{stem}-part{}", i + 1),
             };
+            // A file name is at most 255 bytes: keep the base to 200, cut between characters, which leaves room for ".pdf" and a -N suffix.
+            if let Some((end, _)) = base.char_indices().find(|(at, c)| at + c.len_utf8() > 200) {
+                base.truncate(end);
+            }
+            let file = format!("{base}.pdf");
             // Equal titles (or titles that sanitize alike) get -2, -3, ... so no part overwrites another; compared case-insensitively.
-            let mut unique = file.clone();
+            let mut unique = file;
             let mut n = 1;
             while !used.insert(unique.to_lowercase()) {
                 n += 1;
-                unique = format!("{}-{n}.pdf", file.trim_end_matches(".pdf"));
+                unique = format!("{base}-{n}.pdf");
             }
             let path = child(&dir, &unique);
             write_atomic(&path, bytes)?;
@@ -1791,12 +1804,17 @@ impl Automation {
 
     /// A 1-based insertion position (1 = before the first page, n+1 = after the last) → 0-based.
     fn position(&self, a: &Args, key: &str) -> Result<usize> {
+        self.opt_position(a, key)?.ok_or_else(|| Args::missing(key))
+    }
+
+    /// `position`, but `None` when the key is absent.
+    fn opt_position(&self, a: &Args, key: &str) -> Result<Option<usize>> {
+        let Some(at) = a.opt_int(key)? else { return Ok(None) };
         let n = self.doc(a)?.info.pages.len();
-        let at = a.int(key)?;
         if at < 1 || at as usize > n + 1 {
             return Err(ToolError::InvalidArgs(format!("{key} must be between 1 and {} (the document has {n} pages)", n + 1)));
         }
-        Ok(at as usize - 1)
+        Ok(Some(at as usize - 1))
     }
 
     fn renderer(&mut self, id: DocId) -> Result<&mut PageRenderer> {
@@ -2404,6 +2422,9 @@ fn info(d: &Document) -> Value {
         "pdf_version": i.pdf_version,
         "file_size": i.file_size,
         "title": i.title, "author": i.author, "subject": i.subject, "keywords": i.keywords,
+        // Custom document properties (Document Properties ▸ Custom): /Info entries beyond the
+        // ones the spec names, set and cleared with doc_set_info.
+        "custom": i.custom.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
         "creator": i.creator, "producer": i.producer,
         "tagged": i.tagged,
         "has_javascript": i.has_javascript,
@@ -3110,5 +3131,24 @@ mod tests {
         perms.set_readonly(false);
         std::fs::set_permissions(&target, perms).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recovered document, or a new one, rotated and then undone still has never been saved:
+    /// `doc_close` refuses it unless told to discard it (#2346 review).
+    #[test]
+    fn closing_a_recovered_or_new_document_after_undo_is_refused() {
+        let mut a = Automation::new();
+        let recovered = a.session.open("Report.pdf", None, Arc::new(numbered_pages(2)), None).unwrap();
+        a.session.mark_recovered(recovered, Some("Report.pdf".into()));
+        let new = a.session.open_new("Combined.pdf", Arc::new(numbered_pages(2))).unwrap();
+        for id in [recovered, new] {
+            json(&mut a, "page_rotate", json!({"doc": id.0, "pages": [1], "degrees": 90}));
+            json(&mut a, "edit_undo", json!({"doc": id.0}));
+            let refused = a.call("doc_close", &json!({"doc": id.0}));
+            assert!(matches!(&refused, Err(e) if e.to_string().contains("unsaved changes")), "{id:?}: {refused:?}");
+            assert!(a.session.get(id).is_some(), "still open");
+            json(&mut a, "doc_close", json!({"doc": id.0, "discard_changes": true}));
+            assert!(a.session.get(id).is_none());
+        }
     }
 }

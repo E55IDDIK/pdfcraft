@@ -25,7 +25,7 @@ clear_marks(&mut doc, None)?;                        // remove marks without app
 - **vectors**: covered paths are removed; partly covered paths and shadings are clipped so
   nothing paints inside the areas;
 - **form XObjects**: rewritten recursively into new objects (pages sharing the original keep it);
-- **annotations** whose rectangle overlaps (with their pop-ups), and **form fields** with a
+- **annotations** whose rectangle overlaps (with their pop-ups and their replies, `/IRT`), and **form fields** with a
   widget under a mark;
 - the marks themselves, replaced by boxes in their fill colour (and overlay text) drawn into the
   page as a `/PCMark /Redaction` stream.
@@ -43,6 +43,11 @@ This limits appearance generation; it is not a limit on the input PDF or the who
 
 Structure cleanup resolves named MCIDs and indirect content references. Form content
 references are updated to the cleaned copy; unchanged sibling descriptions remain.
+
+Replacement descriptions are removed only from marked-content spans changed by cleanup.
+Unchanged spans retain their descriptions; unused property entries are retired during redaction
+and hidden-content cleanup, including aliases in shared/inherited resources. Descriptions still
+used by surviving pages or forms are kept.
 
 A redacted page that inherits `/Resources` from the page tree gets them pinned (by reference;
 a direct inherited dictionary is made one shared object first) before it is rewritten. The parent's

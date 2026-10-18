@@ -918,11 +918,16 @@ impl Automation {
         let list: Vec<Value> = found
             .iter()
             .map(|(p, c)| {
-                let kind = match c.kind {
-                    pdfcraft_engine::detect::Kind::Text => "text",
-                    pdfcraft_engine::detect::Kind::CheckBox => "checkbox",
+                let (kind, comb) = match c.kind {
+                    pdfcraft_engine::detect::Kind::Text => ("text", None),
+                    pdfcraft_engine::detect::Kind::CheckBox => ("checkbox", None),
+                    pdfcraft_engine::detect::Kind::Comb { cells } => ("text", Some(cells)),
                 };
-                json!({ "page": p + 1, "kind": kind, "name": c.name, "rect": c.rect.map(|v| (v * 100.0).round() / 100.0) })
+                let mut v = json!({ "page": p + 1, "kind": kind, "name": c.name, "rect": c.rect.map(|v| (v * 100.0).round() / 100.0) });
+                if let Some(cells) = comb {
+                    v["comb"] = json!(cells);
+                }
+                v
             })
             .collect();
         if a.opt_bool("add")?.unwrap_or(true) && !found.is_empty() {

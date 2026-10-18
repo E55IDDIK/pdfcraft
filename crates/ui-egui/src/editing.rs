@@ -24,6 +24,7 @@ pub enum CloseRequest {
 pub struct PendingOverwrite {
     pub id: pdfcraft_engine::DocId,
     pub dest: String,
+    target: SaveTarget,
     /// What was to run once the document is written (close its tab, quit).
     after: Box<dyn FnOnce(&mut PdfCraftApp) + Send>,
 }
@@ -52,7 +53,16 @@ impl PdfCraftApp {
                 let Some(doc) = self.session.get(id) else { return true };
                 let info = &doc.info;
                 let view = &mut self.views[i];
-                if !matches!(edit, Edit::AddAnnotation(_)) {
+                // A picture picked with the Select tool may be the one this edit removed or moved:
+                // drop its highlight now, not on the next frame (which only comes with the next input).
+                view.picked_image = None;
+                if let Some(ctx) = &self.ctx {
+                    ctx.request_repaint();
+                }
+                if matches!(edit, Edit::AddAnnotation(_)) {
+                    // A released drawing's raster can come now: it will have the annotation.
+                    view.comments.drawings_committed();
+                } else {
                     // Only a new drawing waits on its raster; any other edit may remove or move it.
                     view.comments.settling.clear();
                 }
@@ -123,6 +133,11 @@ impl PdfCraftApp {
                         let to = to.min(info.pages.len() - n);
                         view.select_pages(&(to..to + n).collect::<Vec<_>>());
                     }
+                    Edit::DuplicatePages { pages, at: Some(at) } => {
+                        let n = pages.iter().collect::<std::collections::BTreeSet<_>>().len();
+                        let at = at.min(info.pages.len().saturating_sub(n));
+                        view.select_pages(&(at..at + n).collect::<Vec<_>>());
+                    }
                     Edit::InsertBlankPage { at, .. } => view.select_pages(&[at.min(info.pages.len() - 1)]),
                     Edit::DeletePages { .. } => view.select_pages(&[]),
                     // A stroke drawn with the pen stays unselected, so the selection box and
@@ -163,6 +178,10 @@ impl PdfCraftApp {
                 true
             }
             Err(e) => {
+                if let Some(view) = self.views.get_mut(i) {
+                    // A drawing whose annotation wasn't added must not stay painted.
+                    view.comments.drawings_refused();
+                }
                 let message = if matches!(edit, Edit::MoveObjects { .. }) { crate::object_ui::move_error(&e) } else { e.to_string() };
                 self.notify_fmt("{label} failed: {e}", &[("label", &crate::i18n::edit_label(&label)), ("e", &message)]);
                 false
@@ -614,12 +633,12 @@ impl PdfCraftApp {
                     let dialog = rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(name);
                     // The bytes are taken once the user has chosen, so edits made meanwhile are saved too.
                     self.ask_one(crate::pickers::Ask::Save(dialog), None, move |app, dest| {
-                        app.save_doc_to_then(id, &dest.to_string_lossy(), Box::new(after));
+                        app.save_doc_to_then(id, &dest.to_string_lossy(), target, Box::new(after));
                     });
                     return false;
                 }
             };
-            self.save_doc_to_then(id, &destination, Box::new(after))
+            self.save_doc_to_then(id, &destination, target, Box::new(after))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -674,14 +693,14 @@ impl PdfCraftApp {
     /// `pending_overwrite` behind [`Dialog::OverwriteChanged`](crate::Dialog::OverwriteChanged).
     /// Returns `true` if written now.
     #[cfg(not(target_arch = "wasm32"))]
-    fn save_doc_to_then(&mut self, id: pdfcraft_engine::DocId, dest: &str, after: Box<dyn FnOnce(&mut Self) + Send>) -> bool {
+    fn save_doc_to_then(&mut self, id: pdfcraft_engine::DocId, dest: &str, target: SaveTarget, after: Box<dyn FnOnce(&mut Self) + Send>) -> bool {
         let own = self.session.get(id).and_then(|d| d.path.as_deref()).is_some_and(|p| crate::same_file(p, dest));
         if own && self.watch.disk_differs(id, dest) {
-            self.pending_overwrite = Some(PendingOverwrite { id, dest: dest.to_string(), after });
+            self.pending_overwrite = Some(PendingOverwrite { id, dest: dest.to_string(), target, after });
             self.dialog = Some(crate::Dialog::OverwriteChanged);
             return false;
         }
-        let saved = self.save_doc_to(id, dest);
+        let saved = self.save_doc_to(id, dest, target);
         if saved {
             after(self);
         }
@@ -692,7 +711,7 @@ impl PdfCraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn overwrite_changed_file(&mut self) {
         let Some(p) = self.pending_overwrite.take() else { return };
-        if self.save_doc_to(p.id, &p.dest) {
+        if self.save_doc_to(p.id, &p.dest, p.target) {
             (p.after)(self);
         }
     }
@@ -708,17 +727,27 @@ impl PdfCraftApp {
 
     /// Write document `id` to `dest` and make it the document's file. Returns `true` if written.
     #[cfg(not(target_arch = "wasm32"))]
-    fn save_doc_to(&mut self, id: pdfcraft_engine::DocId, dest: &str) -> bool {
+    fn save_doc_to(&mut self, id: pdfcraft_engine::DocId, dest: &str, target: SaveTarget) -> bool {
         // Save As answers on a later frame: commit what was typed meanwhile, too (#166), even
         // if another tab is active by then.
         if !self.commit_typing_in(id) || !self.flatten_fill_sign_for_save(id) {
             return false;
         }
-        let Some(name) = self.session.get(id).map(|d| d.name.clone()) else {
+        let Some((name, full)) = self.session.get(id).map(|d| {
+            // Save As to another file is a clean copy, without the earlier revisions that still
+            // hold deleted pages or replaced text (#2165). A signed document stays incremental so
+            // its signatures keep covering the file.
+            let full = target == SaveTarget::As
+                && !d.path.as_deref().is_some_and(|p| crate::same_file(p, dest))
+                && d.read_only_reason.is_none()
+                && !d.is_signed();
+            (d.name.clone(), full)
+        }) else {
             self.notify_tr("The document was closed before it could be saved.");
             return false;
         };
-        let bytes = match self.session.save_bytes(id).and_then(|b| self.session.check_save(id, &b).map(|()| b)) {
+        let bytes = if full { self.session.save_full_bytes(id) } else { self.session.save_bytes(id) };
+        let bytes = match bytes.and_then(|b| self.session.check_save(id, &b).map(|()| b)) {
             Ok(b) => b,
             Err(e) => {
                 self.notify_fmt("Couldn't save {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
@@ -972,13 +1001,15 @@ fn is_form_edit(edit: &Edit) -> bool {
 /// classic Outlook (`Temporary Internet Files\Content.Outlook\` on older Windows), and the
 /// `Microsoft.OutlookForWindows` package folder for the new Outlook. Saving there either fails,
 /// because Outlook can still hold the file, or appears to work while the edits stay out of the
-/// email and are deleted with the cache. Matched on either separator and in any case, so it can
-/// be tested on every platform.
+/// email and are deleted with the cache. Apple Mail opens one from `Mail Downloads/<UUID>/` in
+/// its sandbox container, where other apps can't write, so saving there fails (#2751). Matched on
+/// either separator and in any case, so it can be tested on every platform.
 pub(crate) fn is_mail_temp_copy(path: &str) -> bool {
     let p = path.replace('\\', "/").to_ascii_lowercase();
     p.contains("/inetcache/content.outlook/")
         || p.contains("/temporary internet files/content.outlook/")
         || p.contains("/microsoft.outlookforwindows")
+        || p.contains("/library/containers/com.apple.mail/data/library/mail downloads/")
 }
 
 /// Write via a temporary file in the same directory and rename over the target, so a crash or
@@ -1226,8 +1257,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Windows refuses to replace a read-only file, so the rename fails: the staging file must not
-    /// be left behind.
+    /// A read-only target is refused before anything is staged, so no staging file is left
+    /// behind.
     #[cfg(windows)]
     #[test]
     fn a_failed_save_removes_the_staging_file() {
@@ -1238,7 +1269,7 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&target, perms.clone()).unwrap();
         let e = write_atomically_with(&target.to_string_lossy(), b"NEW", [7]).unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "the rename failed: {e}");
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "a read-only target is refused: {e}");
         assert_eq!(read(&target), "OLD");
         assert_eq!(listing(&dir), ["out.pdf"], "the staging file was removed");
         #[allow(clippy::permissions_set_readonly_false)]
@@ -1297,12 +1328,24 @@ mod tests {
     }
 
     #[test]
+    fn apple_mail_attachment_copies_are_recognised() {
+        for p in [
+            "/Users/me/Library/Containers/com.apple.mail/Data/Library/Mail Downloads/6F1C2A9E-3B4D-4E5F-8A7B-9C0D1E2F3A4B/booking.pdf",
+            "/Users/me/library/containers/COM.APPLE.MAIL/data/library/mail downloads/6F1C2A9E/Booking (2).pdf",
+        ] {
+            assert!(is_mail_temp_copy(p), "{p}");
+        }
+    }
+
+    #[test]
     fn ordinary_paths_are_not_mail_copies() {
         for p in [
             r"C:\Users\me\Documents\Quote.pdf",
             r"C:\Users\me\OneDrive - Contoso\Content.Outlook notes\Quote.pdf",
             r"C:\Users\me\AppData\Local\Microsoft\Windows\INetCache\IE\Quote.pdf",
             "/home/me/Documents/Quote.pdf",
+            "/Users/me/Downloads/Mail Downloads/booking.pdf",
+            "/Users/me/Library/Containers/com.apple.Notes/Data/Library/Mail Downloads/booking.pdf",
             "Quote.pdf",
         ] {
             assert!(!is_mail_temp_copy(p), "{p}");

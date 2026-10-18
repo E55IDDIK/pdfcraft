@@ -7,6 +7,8 @@ use egui_kittest::kittest::Queryable;
 use pdfcraft_render::Annotation;
 use pdfcraft_ui_egui::{PdfCraftApp, QuickTool};
 
+mod support;
+
 /// Two 300×200 pages of Helvetica text.
 const TEXT_FIXTURE: &[u8] = b"%PDF-1.7
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
@@ -365,6 +367,40 @@ fn selected_text_shows_actions_and_underlines_without_changing_tools() {
 }
 
 #[test]
+fn selected_text_copy_action_closes_the_bar_and_keeps_the_selection() {
+    let mut h = harness(|_| {});
+    h.state_mut().views[0].select_text(0, 4, 8);
+    h.run_steps(3);
+    h.get_by_label("Copy").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Add comment").is_none(), "the action bar closes after Copy");
+    assert!(h.state().views[0].selected_text().is_some_and(|t| !t.is_empty()), "the words stay selected");
+    // A new selection brings the bar back.
+    h.state_mut().views[0].select_text(0, 2, 6);
+    h.run_steps(3);
+    h.get_by_label("Add comment");
+}
+
+#[test]
+fn dragging_over_copied_text_again_brings_the_action_bar_back() {
+    let mut h = harness(|_| {});
+    let (a, b) = {
+        let v = &h.state().views[0];
+        (v.glyph_screen_pos(0, 4).expect("text layer"), v.glyph_screen_pos(0, 8).expect("glyph"))
+    };
+    drag(&mut h, a, b);
+    let copied = h.state().views[0].selected_text();
+    assert!(copied.is_some(), "the drag selects text");
+    h.get_by_label("Copy").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Add comment").is_none(), "the action bar closes after Copy");
+    // The same drag again selects the same words, which is a new selection: the bar is back.
+    drag(&mut h, a, b);
+    assert_eq!(h.state().views[0].selected_text(), copied, "the drag selects the same words");
+    assert!(h.query_by_label("Add comment").is_some(), "the action bar is back after a new drag");
+}
+
+#[test]
 fn selected_text_replace_action_opens_replacement_composer() {
     let mut h = harness(|_| {});
     h.state_mut().views[0].select_text(0, 4, 8);
@@ -406,8 +442,11 @@ fn shapes_and_ink_are_drawn_by_dragging() {
     assert!((r[0] - 40.0).abs() < 3.0 && (r[1] - 40.0).abs() < 3.0 && (r[2] - 140.0).abs() < 3.0 && (r[3] - 100.0).abs() < 3.0, "{r:?}");
 }
 
-/// Press, drag and release a stroke, running only one frame after the release.
+/// Press, drag and release a stroke, running only one frame after the release. Finished
+/// renders are held back from the view (`hold_rasters`), so the raster the commit asks for can't
+/// arrive before the test looks, however fast it renders; a test lets it through by clearing it.
 fn stroke_without_settling(h: &mut Harness<'static, PdfCraftApp>, a: (f32, f32), b: (f32, f32)) {
+    h.state_mut().views[0].hold_rasters = true;
     let (from, to) = (at(h, a.0, a.1), at(h, b.0, b.1));
     h.hover_at(from);
     h.run_steps(1);
@@ -429,7 +468,10 @@ fn a_released_pen_stroke_stays_drawn_until_the_page_raster_has_it() {
     stroke_without_settling(&mut h, (40.0, 100.0), (140.0, 60.0));
     assert_eq!(comments(&h).len(), 1, "the stroke is committed");
     assert_eq!(h.state().views[0].comments.settling_len(), 1, "still drawn from its points");
-    settle(&mut h);
+    h.run_steps(5);
+    assert_eq!(h.state().views[0].comments.settling_len(), 1, "drawn from its points for as long as its raster takes");
+    h.state_mut().views[0].hold_rasters = false;
+    support::wait_until(&mut h, "the page raster with the stroke", |app| app.views[0].comments.settling_len() == 0);
     assert_eq!(h.state().views[0].comments.settling_len(), 0, "the raster draws it now");
 }
 
@@ -1203,6 +1245,91 @@ fn attaching_a_file_as_a_comment() {
     let doc = s.session.get(s.views[0].id).unwrap();
     assert!(doc.info.attachments.iter().any(|a| a.name == "notes.txt"), "listed in the Attachments panel");
     assert_eq!(s.quick_tool, QuickTool::Select);
+}
+
+/// One 300×200 page with a paperclip FileAttachment comment at (100, 100)–(120, 124) carrying
+/// `inner.pdf`, and no /Contents: the card shows only "Attachment" (#2565). The cross-reference
+/// table keeps the reader from mistaking the embedded PDF's objects for the outer ones.
+fn attachment_comment_fixture() -> Vec<u8> {
+    let inner = "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+                 3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Annots [4 0 R] >>".into(),
+        "<< /Type /Annot /Subtype /FileAttachment /Rect [100 100 120 124] /Name /Paperclip /T (Reviewer) /M (D:20261014105200) /FS 5 0 R >>".into(),
+        "<< /Type /Filespec /F (inner.pdf) /UF (inner.pdf) /EF << /F 6 0 R >> >>".into(),
+        format!("<< /Type /EmbeddedFile /Length {} >>\nstream\n{inner}\nendstream", inner.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+fn attachment_harness(setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("annexed.pdf", None, attachment_comment_fixture()).expect("opens");
+        app.set_option("left", "closed").unwrap();
+        setup(&mut app);
+        app
+    });
+    h.run_steps(4);
+    settle(&mut h);
+    h
+}
+
+fn open_tab_names(h: &Harness<'static, PdfCraftApp>) -> Vec<String> {
+    let s = h.state();
+    s.views.iter().filter_map(|v| s.session.get(v.id)).map(|d| d.name.clone()).collect()
+}
+
+#[test]
+fn an_attachment_comment_opens_its_file_from_the_page_menu() {
+    let mut h = attachment_harness(|app| {
+        app.set_option("panel", "comments").unwrap();
+        app.set_option("quick", "select").unwrap();
+    });
+    assert_eq!(comments(&h)[0].subtype, "FileAttachment");
+    click_pt(&mut h, (110.0, 112.0));
+    assert_eq!(h.state().views[0].comments.selected, Some((0, 0)), "the attachment comment is selected");
+    let p = at(&h, 110.0, 112.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
+    h.run_steps(3);
+    h.get_by_label("Copy text");
+    // The Attachments panel is closed, so these items can only come from the comment's menu.
+    h.get_by_label("Save attachment…");
+    h.get_by_label("Open in a new tab").click();
+    h.run_steps(4);
+    assert_eq!(open_tab_names(&h), ["annexed.pdf", "inner.pdf"]);
+}
+
+#[test]
+fn an_attachment_comment_opens_its_file_from_the_card_menu() {
+    let mut h = attachment_harness(|app| app.set_option("panel", "comments").unwrap());
+    h.state_mut().views[0].comments.selected = Some((0, 0));
+    h.run_steps(2);
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Copy text");
+    h.get_by_label("Save attachment…");
+    h.get_by_label("Open in a new tab").click();
+    h.run_steps(4);
+    assert_eq!(open_tab_names(&h), ["annexed.pdf", "inner.pdf"]);
 }
 
 /// Drag with the middle button (the mouse wheel) in small steps.

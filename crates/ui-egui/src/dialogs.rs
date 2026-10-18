@@ -354,17 +354,20 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                             let ends = doc.revision_ends();
                             if ends.len() > 1 {
                                 ui.label(egui::RichText::new(tl!("Revisions")).color(t.text_muted));
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(ends.len().to_string());
-                                    for n in (1..ends.len()).rev().take(12) {
-                                        if ui
-                                            .small_button(crate::i18n::fmt(tl!("View revision {n}"), &[("n", &n.to_string())]))
-                                            .on_hover_text(tl!("Open the file as it was saved then"))
-                                            .clicked()
-                                        {
-                                            open_revision = Some(n);
+                                // Reserve the full wrapped height before the grid starts the next row.
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(ends.len().to_string());
+                                        for n in (1..ends.len()).rev().take(12) {
+                                            if ui
+                                                .small_button(crate::i18n::fmt(tl!("View revision {n}"), &[("n", &n.to_string())]))
+                                                .on_hover_text(tl!("Open the file as it was saved then"))
+                                                .clicked()
+                                            {
+                                                open_revision = Some(n);
+                                            }
                                         }
-                                    }
+                                    });
                                 });
                                 ui.end_row();
                             }

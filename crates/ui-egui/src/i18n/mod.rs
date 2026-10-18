@@ -390,9 +390,23 @@ fn first_supported(list: &str) -> Option<Lang> {
     list.split(['(', ')', ',', '"', '\n']).map(str::trim).filter(|s| !s.is_empty()).find_map(lang_from_tag)
 }
 
+/// The first supported language among BCP 47 tags in preference order, as the browser lists them
+/// in `navigator.languages` (#2954). Only the first few tags are looked at: the list is short in
+/// practice, and a page can't make Auto walk an unbounded one.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn first_supported_tag<S: AsRef<str>>(tags: impl IntoIterator<Item = S>) -> Option<Lang> {
+    tags.into_iter().take(32).find_map(|tag| lang_from_tag(tag.as_ref().trim()))
+}
+
+/// The browser's preferred languages, as the desktop builds use the system's: `navigator.languages`
+/// in order, then `navigator.language` (kept within the 32 tags `first_supported_tag` reads).
+/// English when the browser offers none we have a catalog for.
 #[cfg(target_arch = "wasm32")]
 fn detect_system_lang() -> Lang {
-    Lang::EN
+    let Some(navigator) = web_sys::window().map(|w| w.navigator()) else { return Lang::EN };
+    let mut tags: Vec<String> = navigator.languages().iter().take(31).filter_map(|v| v.as_string()).collect();
+    tags.extend(navigator.language());
+    first_supported_tag(&tags).unwrap_or(Lang::EN)
 }
 
 thread_local! {
@@ -411,7 +425,38 @@ pub fn set_current(lang: Lang) {
 /// `label` as it reads inside a sentence ("add a text box"): lowercased, except in languages
 /// that capitalise nouns (German), where lowercasing would misspell it.
 pub fn in_sentence(label: &str) -> std::borrow::Cow<'_, str> {
-    if current().code() == "de" { std::borrow::Cow::Borrowed(label) } else { std::borrow::Cow::Owned(label.to_lowercase()) }
+    match current().code() {
+        "de" => std::borrow::Cow::Borrowed(label),
+        "tr" => std::borrow::Cow::Owned(label.chars().flat_map(lower_turkish).collect()),
+        _ => std::borrow::Cow::Owned(label.to_lowercase()),
+    }
+}
+
+/// The translation of `english` in upper case, for section titles. Rust's case mapping knows no
+/// language, and Turkish has a dotted and a dotless i (`i` ↔ `İ`, `ı` ↔ `I`): "Gelişmiş" must
+/// become "GELİŞMİŞ", not "GELIŞMIŞ". A label without a Turkish row is still English and keeps
+/// the English rule.
+pub fn upper_label(english: &str) -> String {
+    let lang = current();
+    let shown = tr(lang, english);
+    if lang.code() == "tr" && has(lang, english) { shown.chars().flat_map(upper_turkish).collect() } else { shown.to_uppercase() }
+}
+
+fn upper_turkish(c: char) -> std::char::ToUppercase {
+    match c {
+        'i' => 'İ'.to_uppercase(),
+        'ı' => 'I'.to_uppercase(),
+        c => c.to_uppercase(),
+    }
+}
+
+fn lower_turkish(c: char) -> std::char::ToLowercase {
+    match c {
+        // `İ`.to_lowercase() is "i" plus a combining dot above.
+        'İ' => 'i'.to_lowercase(),
+        'I' => 'ı'.to_lowercase(),
+        c => c.to_lowercase(),
+    }
 }
 
 pub fn current() -> Lang {
@@ -617,6 +662,21 @@ mod tests {
         assert_eq!(first_supported("(\n    \"ja-JP\",\n    \"en-US\"\n)\n"), Some(JA()));
         assert_eq!(first_supported("(\n    \"fr-FR\",\n    \"en-US\"\n)\n"), Lang::from_code("fr"));
         assert_eq!(first_supported("("), None);
+    }
+
+    /// #2954: the web build's Auto language follows the browser's preferred languages in order,
+    /// skipping ones without a catalog, and is English only when none is supported.
+    #[test]
+    fn browser_language_list_is_followed_in_order() {
+        assert_eq!(first_supported_tag(["it-IT", "en-US"]), Lang::from_code("it"));
+        assert_eq!(first_supported_tag(["xx-YY", "ja", "fr-FR"]), Some(JA()));
+        assert_eq!(first_supported_tag(["zh-TW"]), Lang::from_code("zh-hant"));
+        assert_eq!(first_supported_tag(["en-GB", "fr-FR"]), Some(Lang::EN));
+        assert_eq!(first_supported_tag([" pt-PT "]), Lang::from_code("pt-br"));
+        assert_eq!(first_supported_tag(["", "xx"]), None);
+        assert_eq!(first_supported_tag(Vec::<String>::new()), None);
+        let long = std::iter::repeat_n("xx", 10_000).chain(["fr"]);
+        assert_eq!(first_supported_tag(long), None, "only the first tags are read");
     }
 
     #[test]
@@ -1959,6 +2019,20 @@ mod tests {
         set_current(Lang::from_code("de").expect("de registered"));
         assert_eq!(in_sentence("Textfeld"), "Textfeld");
         set_current(Lang::EN);
+    }
+
+    #[test]
+    fn turkish_keeps_its_dotted_and_dotless_i_when_changing_case() {
+        set_current(Lang::from_code("tr").expect("tr registered"));
+        assert_eq!(upper_label("Advanced"), "GELİŞMİŞ");
+        assert_eq!(upper_label("Signatures"), "İMZALAR");
+        // A label with no Turkish row is still English and keeps the English rule.
+        assert_eq!(upper_label("Untranslated title"), "UNTRANSLATED TITLE");
+        assert_eq!(in_sentence("İmza Alanı"), "imza alanı");
+        assert_eq!(in_sentence("Işık"), "ışık");
+        set_current(Lang::EN);
+        assert_eq!(upper_label("Advanced"), "ADVANCED");
+        assert_eq!(in_sentence("Image"), "image");
     }
 
     #[test]

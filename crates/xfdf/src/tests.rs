@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use pdfcraft_annot::{Markup, Meta, NewAnnotation, Shape, Style, add_annotation, add_reply, summaries};
+use pdfcraft_annot::{Markup, Meta, NewAnnotation, Shape, Style, add_annotation, add_reply, add_text_replacement, summaries};
 use pdfcraft_cos::{SaveOptions, write_full, write_incremental};
 use pdfcraft_forms::{NewField, add_field, fields, set_value};
 
@@ -140,6 +140,32 @@ fn comment_view(doc: &Document) -> Vec<String> {
 
 fn values(doc: &Document) -> Vec<(String, Vec<String>)> {
     fields(doc).into_iter().map(|f| (f.name, f.value)).collect()
+}
+
+/// #2666: Replace Text writes a StrikeOut and a Caret that replies to it. XFDF names a reply by
+/// the `/NM` of what it replies to, so when both carried one id the caret's `inreplyto` was its
+/// own `name`: importing it found a comment replying to itself and the pair was lost.
+#[test]
+fn a_replace_text_pair_survives_an_xfdf_round_trip() {
+    let mut src = blank();
+    let quads = [[100.0, 720.0, 200.0, 720.0, 100.0, 706.0, 200.0, 706.0]];
+    let style = Style { color: [0.89, 0.13, 0.13], opacity: 1.0, width: 1.0, fill: None };
+    let meta = |id: &str| Meta { date: Some("D:20261001120000Z".into()), id: id.into() };
+    add_text_replacement(&mut src, 0, &quads, "new words", "Ada", &style, &style, &meta("strike"), &meta("caret")).unwrap();
+    assert_eq!(summaries(&src).len(), 2, "a strikeout and a caret");
+
+    let xfdf = export_xfdf(&src, true, false, "a.pdf");
+    assert!(xfdf.contains("name=\"strike\"") && xfdf.contains("name=\"caret\""), "each gets its own name: {xfdf}");
+    assert!(xfdf.contains("inreplyto=\"strike\""), "the caret replies to the strikeout: {xfdf}");
+    assert!(!xfdf.contains("inreplyto=\"caret\""), "never a reply to itself");
+
+    let mut dst = blank();
+    let r = import(&mut dst, xfdf.as_bytes()).unwrap();
+    assert_eq!(r.comments, 2, "both comments import: {r:?}");
+    let found = summaries(&dst);
+    let kinds: Vec<&str> = found.iter().map(|s| s.subtype.as_str()).collect();
+    assert!(kinds.contains(&"StrikeOut") && kinds.contains(&"Caret"), "{kinds:?}");
+    assert_eq!(comment_view(&dst), comment_view(&src), "the pair and its thread survive");
 }
 
 #[test]
@@ -1143,4 +1169,50 @@ fn xml_form_import_preserves_text_around_comments_and_instructions() {
         }
         assert_eq!(fields(&original).into_iter().find(|f| f.name == "Name").unwrap().value, vec!["replace me"]);
     }
+}
+
+#[test]
+fn csv_headers_with_tabs_survive_export_import_and_save() {
+    for name in ["First\tName", "\tName", "Name\t", "Name\t\"quoted\"", "Name\nwith\ta tab"] {
+        let mut source = one_field();
+        add_field(&mut source, 0, [50.0, 650.0, 250.0, 670.0], &NewField::Text { multiline: false }, Some("Other")).unwrap();
+        set_value(&mut source, "Other", &FieldValue::Text("other field".into())).unwrap();
+        let field = fields(&source).into_iter().find(|f| f.name == "Name").unwrap().obj;
+        source.update_dict(field, |dict| dict.set(b"T".to_vec(), PdfString::text(name))).unwrap();
+        set_value(&mut source, name, &FieldValue::Text("original, \"value\"".into())).unwrap();
+        let bytes = write_full(&source, &SaveOptions::default()).unwrap();
+        let source = Document::open(Arc::new(bytes.clone())).unwrap();
+        let row = data_values(&bytes).unwrap();
+        for csv in [export_data(&source, Format::Csv), merge_csv(&[row])] {
+            let mut doc = Document::open(Arc::new(bytes.clone())).unwrap();
+            set_value(&mut doc, name, &FieldValue::Text("replacement".into())).unwrap();
+            set_value(&mut doc, "Other", &FieldValue::Text("other replacement".into())).unwrap();
+            let report = import(&mut doc, csv.as_bytes()).unwrap();
+            assert_eq!(report.fields, 2);
+            assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+            for saved in [write_full(&doc, &SaveOptions::default()).unwrap(), write_incremental(&doc, &SaveOptions::default()).unwrap()] {
+                let reopened = Document::open(Arc::new(saved)).unwrap();
+                assert_eq!(fields(&reopened).into_iter().find(|f| f.name == name).unwrap().value, vec!["original, \"value\""], "{csv:?}");
+                assert_eq!(values(&reopened), values(&source), "{csv:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn tabular_import_keeps_tsv_quotes_literal_and_csv_value_tabs() {
+    for name in ["Name", "Na\"me", "\"Name\"", "\"Name"] {
+        let mut doc = one_field();
+        add_field(&mut doc, 0, [50.0, 650.0, 250.0, 670.0], &NewField::Text { multiline: false }, Some("Other")).unwrap();
+        let field = fields(&doc).into_iter().find(|f| f.name == "Name").unwrap().obj;
+        doc.update_dict(field, |dict| dict.set(b"T".to_vec(), PdfString::text(name))).unwrap();
+        let text = format!("{name}\tOther\r\nAda\tother field\r\n");
+        let report = import(&mut doc, text.as_bytes()).unwrap();
+        assert_eq!(report.fields, 2, "{text:?}");
+        assert_eq!(fields(&doc).into_iter().find(|f| f.name == name).unwrap().value, vec!["Ada"]);
+    }
+    let mut doc = one_field();
+    add_field(&mut doc, 0, [50.0, 650.0, 250.0, 670.0], &NewField::Text { multiline: false }, Some("Other")).unwrap();
+    import(&mut doc, b"Name,Other\r\n\"Ada\tLovelace\",other field\r\n").unwrap();
+    assert_eq!(fields(&doc).into_iter().find(|f| f.name == "Name").unwrap().value, vec!["Ada\tLovelace"]);
 }

@@ -529,8 +529,11 @@ fn parse_page_set(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> PageS
             content.push(Rect::new(0.0, 0.0, width, height));
         }
         let items = pa.children().filter(|c| c.is_element()).filter_map(|c| parse_node(c, warnings, depth + 1)).collect();
-        let occur = parse_occur(child(pa, "occur"));
-        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max: occur.max });
+        // A page area with no `<occur>` has no limit and no minimum (a subform's default of one
+        // would exhaust it, and demand a page for every master).
+        let occur = child(pa, "occur").map(|o| parse_occur(Some(o)));
+        let (occur_min, occur_max) = occur.map_or((0, None), |o| (o.min, o.max));
+        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max, occur_min });
     }
     // Nested page sets: take their areas too.
     for ps in children(n, "pageSet") {

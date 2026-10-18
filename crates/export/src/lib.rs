@@ -114,6 +114,34 @@ const COL_TOL: f64 = 4.0;
 /// its columns, so a hostile page laid out as a staircase of blocks would otherwise make
 /// (blocks / 2)² cells.
 const MAX_COLS: usize = 63;
+/// Two blocks in a row this close (as a fraction of their font size) are one line of running
+/// text that changed font or colour, such as a link inside a sentence, not two table cells.
+const INLINE_GAP: f64 = 0.5;
+/// How many blocks ending near a block's start are looked at to find the one it continues; a
+/// page laid out so that many end at the same place stays quick.
+const CONTINUATION_PROBE: usize = 64;
+/// Per block, whether it continues another on the same line: it starts where that one ends (up to
+/// [`INLINE_GAP`] later, or a point earlier for rounding), so it is the same line of text running
+/// on (a link inside a sentence, a superscript), not a cell of its own.
+fn continuations(blocks: &[Block]) -> Vec<bool> {
+    let mut by_end: Vec<(f64, usize)> = blocks.iter().enumerate().map(|(i, b)| (b.rect[2], i)).collect();
+    by_end.sort_by(|a, b| a.0.total_cmp(&b.0));
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(bi, b)| {
+            let k = by_end.partition_point(|(end, _)| *end < b.rect[0] - INLINE_GAP * b.size);
+            by_end
+                .get(k..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|(end, _)| *end <= b.rect[0] + 1.0)
+                .take(CONTINUATION_PROBE)
+                .filter_map(|(_, ai)| blocks.get(*ai).filter(|_| *ai != bi))
+                .any(|a| a.rect[3].min(b.rect[3]) - a.rect[1].max(b.rect[1]) > 0.5 * (a.rect[3] - a.rect[1]).min(b.rect[3] - b.rect[1]))
+        })
+        .collect()
+}
 /// A cell is short: taller blocks are body text (or a multi-column layout), not table cells.
 fn is_cell_like(b: &Block) -> bool {
     (b.rect[3] - b.rect[1]) <= b.size * 5.0 && !b.text.trim().is_empty()
@@ -264,13 +292,20 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
         es.dedup_by(|a, b| (*a - *b).abs() <= COL_TOL);
         es
     };
+    let cont = continuations(blocks);
     let qual: Vec<bool> = rows
         .iter()
         .map(|row| {
-            let mut cs: Vec<usize> = row.iter().map(|(c, _)| *c).collect();
+            // A block that continues another adds no column of its own, and the cells of a table row
+            // sit side by side: blocks that overlap are a paragraph's lines, not cells (#2806).
+            let cells: Vec<(usize, usize)> = row.iter().copied().filter(|(_, bi)| !cont.get(*bi).copied().unwrap_or(false)).collect();
+            let mut spans: Vec<[f64; 2]> = cells.iter().filter_map(|(_, bi)| blocks.get(*bi)).map(|b| [b.rect[0], b.rect[2]]).collect();
+            spans.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            let apart = spans.windows(2).all(|w| w[1][0] >= w[0][1] - COL_TOL);
+            let mut cs: Vec<usize> = cells.iter().map(|(c, _)| *c).collect();
             cs.sort_unstable();
             cs.dedup();
-            cs.len() >= 2
+            apart && cs.len() >= 2
         })
         .collect();
     let mut i = 0;
@@ -1184,6 +1219,75 @@ mod tests {
         assert_eq!(grid_cols(&grid(63)), 63, "63 columns is still a table");
         // Word refuses to open a document with a 64-column table, so that grid stays text.
         assert_eq!(grid_cols(&grid(64)), 0);
+    }
+
+    fn block(t: &str, x0: f64, y0: f64, x1: f64, y1: f64) -> Block {
+        Block { text: t.into(), rect: [x0, y0, x1, y1], size: 12.0, bold: false, italic: false, color: [0.0; 3], rotation: 0.0 }
+    }
+
+    /// #2806: a sentence whose link is set in another colour or font runs on as separate blocks
+    /// on one line. They are not table columns, even when several such lines share left edges.
+    #[test]
+    fn a_link_inside_a_sentence_is_not_a_table_column() {
+        let blue = |t: &str, x0: f64, y0: f64, x1: f64, y1: f64| Block { color: [0.02, 0.388, 0.757], ..block(t, x0, y0, x1, y1) };
+        let p = Page {
+            width: 612.0,
+            height: 792.0,
+            blocks: vec![
+                block("6.3. 2. All content shown at", 121.7, 710.3, 272.0, 724.9),
+                blue("http", 273.5, 710.3, 294.1, 724.9),
+                blue("s", 294.1, 709.8, 298.8, 725.8),
+                blue("://women", 298.8, 710.3, 348.0, 724.9),
+                blue("g", 348.1, 709.8, 353.7, 725.8),
+                blue("randprix.fide.com", 353.7, 710.3, 443.2, 724.9),
+                block("shall be reviewed and approved by the Press Officer.", 164.3, 622.5, 533.1, 724.9),
+                block("6.3. 3. The Organiser shall warrant that", 121.7, 601.8, 345.1, 616.5),
+                blue("https://womengrandprix.fide.com", 350.2, 601.3, 519.9, 617.4),
+                block("is managed in a professional way and furthermore that it is capable of", 164.3, 557.9, 533.0, 616.5),
+                block("6. 3. 4. The Press Officer shall report to the FIDE Head of PR.", 121.7, 516.6, 530.3, 551.9),
+                block("conducted during a WGP tournament.", 164.3, 502.0, 352.5, 516.6),
+            ],
+            images: Vec::new(),
+        };
+        let h = html(std::slice::from_ref(&p), "Regulations");
+        assert!(!h.contains("<table>"), "running text became a table: {h}");
+        for b in &p.blocks {
+            assert!(h.contains(&b.text), "{} was lost: {h}", b.text);
+        }
+    }
+
+    /// #2806: lines that each run on into a link starting at the same place are sentences, not a
+    /// two-column table, even three in a row.
+    #[test]
+    fn sentences_that_run_on_into_links_are_not_a_table() {
+        let blue = |t: &str, x0: f64, y0: f64, x1: f64, y1: f64| Block { color: [0.02, 0.388, 0.757], ..block(t, x0, y0, x1, y1) };
+        let mut blocks = Vec::new();
+        for (n, lead) in ["Rules are published at", "Pairings are posted at", "Results are listed at"].iter().enumerate() {
+            let y = 700.0 - 16.0 * n as f64;
+            blocks.push(block(lead, 72.0, y, 211.0, y + 12.0));
+            blocks.push(blue("https://example.org/event", 212.5, y, 360.0, y + 12.0));
+        }
+        let p = Page { width: 612.0, height: 792.0, blocks, images: Vec::new() };
+        let h = html(std::slice::from_ref(&p), "Event");
+        assert!(!h.contains("<table>"), "sentences became a table: {h}");
+        assert_eq!(h.matches("https://example.org/event").count(), 3, "{h}");
+    }
+
+    /// #2806: a superscript right after a number ("1" "st") continues its cell; the prize table
+    /// around it stays a table.
+    #[test]
+    fn a_superscript_beside_a_number_keeps_its_table() {
+        let mut blocks = vec![block("PLACE", 100.0, 700.0, 140.0, 712.0), block("PRIZE (euros)", 300.0, 700.0, 380.0, 712.0)];
+        for (n, (row, sup)) in [("1", "st"), ("2", "nd"), ("3", "rd"), ("4", "th")].iter().enumerate() {
+            let y = 680.0 - 20.0 * n as f64;
+            blocks.push(block(row, 100.0, y, 106.0, y + 12.0));
+            blocks.push(Block { size: 8.0, ..block(sup, 106.0, y + 5.0, 113.0, y + 13.0) });
+            blocks.push(block(&format!("{},000", 30 - 5 * n), 300.0, y, 340.0, y + 12.0));
+        }
+        let p = Page { width: 612.0, height: 792.0, blocks, images: Vec::new() };
+        let h = html(std::slice::from_ref(&p), "Prizes");
+        assert!(h.contains("<table>"), "the prize table was lost: {h}");
+        assert!(h.contains("30,000") && h.contains("15,000"), "{h}");
     }
 
     #[test]

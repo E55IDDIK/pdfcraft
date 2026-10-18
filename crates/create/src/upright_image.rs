@@ -1,6 +1,6 @@
 //! Photos from phones are stored sideways with an EXIF Orientation tag. PDF image XObjects have
-//! no such tag, so a JPEG embedded as it is would show up turned. Images placed into a page
-//! (stamps, added images, replacements) go through here first.
+//! no such tag, so a JPEG embedded as it is would show up turned. Every JPEG embedded by this
+//! crate (pages made from images, stamps, added images, replacements) goes through here first.
 
 use std::borrow::Cow;
 use std::io::Cursor;
@@ -79,24 +79,7 @@ fn jfif_density(bytes: &[u8]) -> Option<PixelDensity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Edit, MarkFile};
-
-    /// A 60 x 20 JPEG at `dpi` x 72 dpi, tagged with EXIF `orientation` (6: shown turned 90
-    /// degrees clockwise).
-    fn phone_jpeg(orientation: u8, dpi: u16) -> Vec<u8> {
-        let mut jpeg = Vec::new();
-        let mut encoder = JpegEncoder::new(&mut jpeg);
-        encoder.set_pixel_density(PixelDensity { density: (dpi, 72), unit: PixelDensityUnit::Inches });
-        encoder.encode_image(&image::RgbImage::from_pixel(60, 20, image::Rgb([20, 20, 20]))).unwrap();
-        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
-        exif.extend_from_slice(&[orientation, 0, 0, 0, 0, 0, 0, 0]);
-        let mut out = jpeg[..2].to_vec();
-        out.extend_from_slice(&[0xff, 0xe1]);
-        out.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
-        out.extend_from_slice(&exif);
-        out.extend_from_slice(&jpeg[2..]);
-        out
-    }
+    use crate::tests::phone_jpeg;
 
     #[test]
     fn orientation_is_applied_and_plain_images_are_left_alone() {
@@ -110,24 +93,5 @@ mod tests {
         assert!(matches!(upright(&stored), Cow::Borrowed(_)));
         assert!(matches!(upright(b"\x89PNG\r\n\x1a\n"), Cow::Borrowed(_)));
         assert!(matches!(upright(b"\xff\xd8 not a jpeg"), Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn a_phone_photo_used_as_a_custom_stamp_is_embedded_upright() {
-        let mut session = crate::Session::new();
-        let blank = session.create_blank(300.0, 400.0, 1).unwrap();
-        let id = session.open_new("form.pdf", blank).unwrap();
-        // A click places the stamp at its natural size: 30 x 20 pt as stored, 20 x 30 pt upright.
-        // Named "Signature" so `signature_image` finds its picture.
-        let file = MarkFile { name: "photo.jpg".into(), bytes: std::sync::Arc::new(phone_jpeg(6, 144)), page: 0 };
-        let stamp = Edit::AddCustomStamp { page: 0, rect: [100.0, 100.0, 100.0, 100.0], name: "Signature".into(), file, author: "Ada".into() };
-        session.apply(id, stamp).unwrap();
-        let cos = &session.get(id).unwrap().editor.as_ref().unwrap().cos;
-        let picture = pdfcraft_annot::signature_image(cos, 0, 0).unwrap().unwrap();
-        let obj = cos.get(picture);
-        let pdfcraft_cos::Object::Stream(s) = &*obj else { panic!() };
-        assert_eq!((s.dict.int(b"Width"), s.dict.int(b"Height")), (Some(20), Some(60)));
-        let rect = pdfcraft_annot::summaries(cos)[0].rect;
-        assert!(((rect[2] - rect[0]) - 20.0).abs() < 0.01 && ((rect[3] - rect[1]) - 30.0).abs() < 0.01, "{rect:?}");
     }
 }

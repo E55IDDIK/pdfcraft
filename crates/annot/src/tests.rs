@@ -589,6 +589,25 @@ fn links_are_added_edited_listed_and_removed() {
 }
 
 #[test]
+fn link_uri_is_percent_encoded_to_7_bit_ascii() {
+    use crate::links::{self, LinkAction, LinkStyle};
+    let mut doc = fixture();
+    for url in ["https://example.com/ação", "https://example.com/a%20b"] {
+        links::add(&mut doc, 0, [10.0, 10.0, 110.0, 30.0], &LinkAction::Uri(url.into()), &LinkStyle::default()).unwrap();
+    }
+    let doc = reopen(&doc);
+    let urls: Vec<String> = links::list(&doc)
+        .into_iter()
+        .filter_map(|link| match link.action {
+            LinkAction::Uri(url) => Some(url),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(urls, ["https://example.com/a%C3%A7%C3%A3o", "https://example.com/a%20b"]);
+    assert!(urls.iter().all(|url| url.is_ascii()));
+}
+
+#[test]
 fn link_edit_rejects_non_finite_and_overflowed_rectangles_without_mutating_the_pdf() {
     use crate::links::{self, LinkAction, LinkStyle};
     let mut doc = fixture();
@@ -784,7 +803,7 @@ fn replace_text_groups_a_strikeout_and_a_caret() {
     let quads = [[100.0, 720.0, 200.0, 720.0, 100.0, 706.0, 200.0, 706.0]];
     let red = Style { color: [0.89, 0.13, 0.13], opacity: 1.0, width: 1.0, fill: None };
     let blue = Style { color: [0.0, 0.47, 0.84], opacity: 1.0, width: 1.0, fill: None };
-    let i = add_text_replacement(&mut doc, 0, &quads, "new words", "Ada", &red, &blue, &meta("r")).unwrap();
+    let i = add_text_replacement(&mut doc, 0, &quads, "new words", "Ada", &red, &blue, &meta("r"), &meta("r-caret")).unwrap();
     let doc = reopen(&doc);
     let a = list(&doc, 0);
     let strike = &a[i];
@@ -792,13 +811,21 @@ fn replace_text_groups_a_strikeout_and_a_caret() {
     let caret = a.iter().find(|d| d.name(b"Subtype") == Some(b"Caret")).unwrap();
     assert_eq!((text(caret, b"Contents").as_str(), caret.name(b"RT")), ("new words", Some(&b"Group"[..])));
     assert!(caret.reference(b"IRT").is_some());
+    // #2666: the pair needs its own `/NM` each. XFDF names a reply by the `/NM` of what it
+    // replies to, so sharing one id writes `inreplyto` equal to the caret's own `name` and the
+    // pair does not survive an export and import.
+    assert_eq!(text(caret, b"NM").as_str(), "r-caret");
+    assert_eq!(text(strike, b"NM").as_str(), "r");
+    assert_ne!(text(caret, b"NM"), text(strike, b"NM"), "the caret must not carry the strikeout's name");
+    let irt = caret.reference(b"IRT").unwrap();
+    assert_eq!(text(doc.get(irt).as_dict().unwrap(), b"NM").as_str(), "r", "the caret replies to the strikeout");
     let r = rect(caret);
     assert!(r[0] < 200.0 && r[2] > 200.0 && r[1] < 706.0, "at the end of the line, below its baseline: {r:?}");
     // Deleting the strikeout takes the caret with it (the group).
     let mut doc = doc;
     delete_annotation(&mut doc, 0, i).unwrap();
     assert!(!list(&doc, 0).iter().any(|d| d.name(b"Subtype") == Some(b"Caret")));
-    assert!(add_text_replacement(&mut doc, 0, &[], "x", "Ada", &red, &blue, &meta("r")).is_err());
+    assert!(add_text_replacement(&mut doc, 0, &[], "x", "Ada", &red, &blue, &meta("r"), &meta("r-caret")).is_err());
 }
 
 #[test]

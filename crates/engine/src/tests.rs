@@ -519,6 +519,63 @@ fn save_is_incremental_stamps_mod_date_and_rebases() {
     assert_eq!(reopened.revisions().len(), 3);
 }
 
+/// #1937: a file whose cross-reference data had to be rebuilt saved as its original bytes when
+/// nothing was edited, so the damage Document Properties reported as repaired was still in the
+/// file. Save writes the rebuilt file in full; reopened, it needs no repair.
+#[test]
+fn a_repaired_file_is_rewritten_by_save_even_without_edits() {
+    let good = fixture(2);
+    // Every offset in the table is off by the inserted line: the chain reads but leads nowhere.
+    let mut shifted = b"%PDF-1.7\n%shifted\n".to_vec();
+    shifted.extend_from_slice(&good[b"%PDF-1.7\n".len()..]);
+    // No cross-reference table at all.
+    let mut lost = good.clone();
+    lost.truncate(good.windows(9).rposition(|w| w == b"startxref").unwrap());
+    lost.extend_from_slice(b"startxref\n999999\n%%EOF\n");
+    for (name, damaged) in [("shifted", shifted), ("lost", lost)] {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("broken.pdf", Some("/tmp/broken.pdf".into()), Arc::new(damaged.clone()), None).unwrap();
+        let doc = s.get(id).unwrap();
+        assert!(doc.repair_log().iter().any(|l| l.contains("rebuilt cross-reference index")), "{name}: {:?}", doc.repair_log());
+        assert_eq!(doc.info.pages.len(), 2, "{name}");
+        assert!(!doc.dirty, "{name}: a repair is not an edit");
+        let saved = s.save_bytes(id).unwrap();
+        assert_ne!(&saved[..], &damaged[..], "{name}: the damaged bytes are not what Save writes");
+        let reopened = pdfcraft_cos::Document::open(saved.clone()).unwrap();
+        assert!(reopened.repair_log().is_empty(), "{name}: {:?}", reopened.repair_log());
+        assert_eq!(reopened.revisions().len(), 1, "{name}");
+        s.mark_saved(id, saved.clone(), None).unwrap();
+        let doc = s.get(id).unwrap();
+        assert!(doc.repair_log().is_empty(), "{name}: {:?}", doc.repair_log());
+        assert_eq!(doc.info.pages.len(), 2, "{name}");
+        // Sound now: saving again without edits writes the same bytes.
+        assert_eq!(s.save_bytes(id).unwrap(), saved, "{name}");
+    }
+}
+
+/// A damaged file that is signed keeps its bytes on a Save without edits: rewriting it in full
+/// to put the repair on disk would invalidate its signatures without a word.
+#[test]
+fn a_signed_repaired_file_keeps_its_bytes_when_saved_without_edits() {
+    let p12 = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../sign/tests/data/ec-p256.p12")).unwrap();
+    let digital_id = sign::pkcs12::open(&p12, "test").unwrap();
+    // After the test certificate's start date (2026-10-02).
+    let mut s = Session::new().with_clock(|| 1_800_000_000);
+    let id = s.open("fixture.pdf", None, Arc::new(fixture(1)), None).unwrap();
+    let opts = SignOptions { page: 0, rect: Some([20.0, 20.0, 180.0, 60.0]), ..SignOptions::default() };
+    let signed = s.sign(id, &digital_id, opts).unwrap();
+    // A trailing `startxref` that points nowhere: the signed revision's bytes are untouched, but
+    // the file's cross-reference data has to be rebuilt.
+    let mut damaged = signed.to_vec();
+    damaged.extend_from_slice(b"\nstartxref\n999999\n%%EOF\n");
+    let mut t = Session::new().with_clock(|| 1_800_000_000);
+    let tid = t.open("damaged.pdf", Some("/tmp/damaged.pdf".into()), Arc::new(damaged.clone()), None).unwrap();
+    let doc = t.get(tid).unwrap();
+    assert!(doc.repair_log().iter().any(|l| l.contains("rebuilt cross-reference index")), "{:?}", doc.repair_log());
+    assert!(doc.is_signed());
+    assert_eq!(&t.save_bytes(tid).unwrap()[..], &damaged[..], "a signed file is not rewritten without edits");
+}
+
 #[test]
 fn undo_still_works_after_save() {
     let (mut s, id) = session_with(2);
@@ -813,7 +870,7 @@ fn form_with_field(name: &str) -> Vec<u8> {
 fn duplicating_a_page_with_a_field_keeps_the_field_name() {
     let mut s = Session::new().with_clock(|| 1_700_000_000);
     let id = s.open("a.pdf", None, Arc::new(form_with_field("Text1")), None).unwrap();
-    s.apply(id, Edit::DuplicatePages { pages: vec![0] }).unwrap();
+    s.apply(id, Edit::DuplicatePages { pages: vec![0], at: None }).unwrap();
     let doc = s.get(id).unwrap();
     assert_eq!(doc.info.pages.len(), 2);
     assert!(doc.form.iter().all(|f| f.name == "Text1"), "{:?}", doc.form.iter().map(|f| &f.name).collect::<Vec<_>>());
@@ -1182,6 +1239,22 @@ fn the_permissions_password_unlocks_an_open_document() {
     s.mark_saved(id, saved, None).unwrap();
     assert!(s.get(id).unwrap().allows_security_change(), "after saving");
     s.apply(id, Edit::RemoveProtection).unwrap();
+    let plain = s.save_bytes(id).unwrap();
+    assert!(pdfcraft_cos::Document::open(plain).unwrap().security().is_none(), "security removed");
+}
+
+#[test]
+fn remove_security_from_a_file_with_its_encrypt_dictionary_in_the_trailer() {
+    // MuPDF writes /Encrypt inline in the trailer rather than as an object (#2661).
+    let mut doc = pdfcraft_cos::Document::open_with_password(protected("user", "owner", -1), Some("owner")).unwrap();
+    let r = doc.trailer().reference(b"Encrypt").unwrap();
+    let dict = doc.get(r).as_dict().cloned().unwrap();
+    doc.trailer_mut().set(b"Encrypt".to_vec(), pdfcraft_cos::Object::Dict(dict));
+    let bytes = Arc::new(pdfcraft_cos::write_full(&doc, &Default::default()).unwrap());
+    let mut s = Session::new();
+    let id = s.open("m.pdf", None, bytes, Some("owner")).unwrap();
+    s.apply(id, Edit::RemoveProtection).unwrap();
+    assert!(!s.get(id).unwrap().info.encrypted);
     let plain = s.save_bytes(id).unwrap();
     assert!(pdfcraft_cos::Document::open(plain).unwrap().security().is_none(), "security removed");
 }
@@ -1987,6 +2060,59 @@ fn oversized_redaction_overlay_preserves_the_document_and_undo() {
     assert_eq!(page_texts(&s, id), ["Page 1"]);
 }
 
+/// #3046: a layer hidden in the Layers panel stays off on paper, as it is on screen; with the
+/// layers untouched, the document's own configuration prints.
+#[test]
+fn printing_keeps_hidden_layers_hidden() {
+    let content = b"/OC /A BDC 1 0 0 rg 10 10 80 80 re f EMC /OC /B BDC 0 1 0 rg 110 10 80 80 re f EMC";
+    let objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /Order [5 0 R 6 0 R] >> >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Properties << /A 5 0 R /B 6 0 R >> >> >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(), content, b"\nendstream"].concat(),
+        b"<< /Type /OCG /Name (Layer A) >>".to_vec(),
+        b"<< /Type /OCG /Name (Layer B) >>".to_vec(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(o);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+
+    // Red and green pixels on the first printed sheet.
+    let printed = |s: &Session, id: DocId| {
+        let bytes = s.print_pdf(id, &print::Settings { pages: vec![0], ..Default::default() }).unwrap();
+        let mut out = Session::new();
+        let printed = out.open("print.pdf", None, Arc::new(bytes), None).unwrap();
+        let page = render_page(&out, printed);
+        let px = page.rgba.as_chunks::<4>().0;
+        let red = px.iter().filter(|p| p[0] > 200 && p[1] < 60 && p[2] < 60).count();
+        let green = px.iter().filter(|p| p[1] > 200 && p[0] < 60 && p[2] < 60).count();
+        (red, green)
+    };
+    let mut s = Session::new();
+    let id = s.open("layers.pdf", None, Arc::new(pdf), None).unwrap();
+    let (red, green) = printed(&s, id);
+    assert!(red > 100 && green > 100, "untouched layers both print: {red} red, {green} green");
+    let a = s.get(id).unwrap().info.layers.iter().position(|l| l.name == "Layer A").unwrap();
+    assert!(s.set_layer_visible(id, a, false));
+    let (red, green) = printed(&s, id);
+    assert_eq!(red, 0, "Layer A was hidden, so it doesn't print");
+    assert!(green > 100, "Layer B still prints: {green} green");
+    assert!(s.set_layer_visible(id, a, true));
+    let (red, _) = printed(&s, id);
+    assert!(red > 100, "shown again, Layer A prints again: {red} red");
+}
+
 #[test]
 fn printing_lays_out_sheets_that_render() {
     let (s, id) = session_with(5);
@@ -2057,7 +2183,7 @@ fn crop_and_duplicate_pages_show_in_the_viewer() {
     assert_eq!(d.info.pages[0].crop, [10.0, 20.0, 170.0, 260.0]);
     assert_eq!((d.info.pages[0].width, d.info.pages[0].height), (160.0, 240.0), "the viewer shows the cropped size");
     assert_eq!(d.page_boxes()[1][1], [0.0, 0.0, 200.0, 300.0]);
-    s.apply(id, Edit::DuplicatePages { pages: vec![1] }).unwrap();
+    s.apply(id, Edit::DuplicatePages { pages: vec![1], at: None }).unwrap();
     assert_eq!(page_texts(&s, id), ["Page 1", "Page 2", "Page 2"]);
     assert_eq!(s.get(id).unwrap().can_undo(), Some("Duplicate page"));
 }
@@ -3286,6 +3412,35 @@ fn recognize_text_reads_the_euro_sign() {
     assert!(text.contains("€250"), "{text}");
 }
 
+const SYNTHETIC_SCAN_DPI: f64 = 300.0;
+
+/// A scan of the OCR sentence at the source page's physical size, without a text layer.
+fn synthetic_ocr_scan(s: &mut Session) -> (DocId, [f32; 2]) {
+    let text = s.create_from_text("t", "The quick brown fox jumps over the lazy dog.").unwrap();
+    let id = s.open("text.pdf", None, text, None).unwrap();
+    let original = &s.get(id).unwrap().info.pages[0];
+    let size = [original.width, original.height];
+    // A typical 300 DPI scan keeps the small leading glyph in "quick" legible to OCR.
+    let png = export::Exporter::new(s.get(id).unwrap()).png(0, SYNTHETIC_SCAN_DPI).unwrap();
+    // Exported PNGs have no resolution metadata. The 72 DPI import default would enlarge
+    // the page and change the PDF-point coordinates the placement assertions exercise.
+    let scan = s.create_from_images_with_resolution(&[("scan.png".into(), png)], ImageResolution::Dpi(SYNTHETIC_SCAN_DPI)).unwrap();
+    (s.open("scan.pdf", None, scan, None).unwrap(), size)
+}
+
+#[test]
+fn synthetic_ocr_scan_keeps_the_original_page_size_without_models() {
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let (id, expected) = synthetic_ocr_scan(&mut s);
+    let page = &s.get(id).unwrap().info.pages[0];
+    // Rounding to whole raster pixels may change a page edge by at most one pixel.
+    let tolerance = 72.0 / SYNTHETIC_SCAN_DPI;
+    for (actual, expected) in [page.width, page.height].into_iter().zip(expected) {
+        assert!(f64::from((actual - expected).abs()) <= tolerance, "page edge {actual} pt, expected {expected} pt");
+    }
+    assert_eq!(page_texts(&s, id), [""], "the scan has no text until OCR runs");
+}
+
 #[test]
 fn recognize_text_makes_a_scanned_page_searchable() {
     if !ocr::available() {
@@ -3293,12 +3448,7 @@ fn recognize_text_makes_a_scanned_page_searchable() {
         return;
     }
     let mut s = Session::new().with_clock(|| 1_700_000_000);
-    let text = s.create_from_text("t", "The quick brown fox jumps over the lazy dog.").unwrap();
-    let id = s.open("text.pdf", None, text, None).unwrap();
-    // A typical 300 DPI scan keeps the small leading glyph in "quick" legible to OCR.
-    let png = export::Exporter::new(s.get(id).unwrap()).png(0, 300.0).unwrap();
-    let scan = s.create_from_images(&[("scan.png".into(), png)]).unwrap();
-    let id = s.open("scan.pdf", None, scan, None).unwrap();
+    let (id, _) = synthetic_ocr_scan(&mut s);
     assert_eq!(page_texts(&s, id), [""], "a picture has no text");
 
     let found = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap();
@@ -3636,6 +3786,34 @@ fn detecting_fields_on_a_scanned_form() {
         }
         assert!(s.detect_fields(id, &[]).is_empty(), "{scan:?}: nothing left to detect");
     }
+}
+
+#[test]
+fn detecting_comb_boxes_adds_one_comb_field_per_row() {
+    // The rows from #1887: five 18 x 22 cells and ten 16 x 20 cells, each a stroked `re`.
+    let mut body = String::from("BT /F1 10 Tf 40 205 Td (Postcode A) Tj ET BT /F1 10 Tf 40 105 Td (Postcode B) Tj ET\n");
+    for i in 0..5 {
+        body.push_str(&format!("{} 200 18 22 re S\n", 120 + i * 18));
+    }
+    for i in 0..10 {
+        body.push_str(&format!("{} 100 16 20 re S\n", 120 + i * 16));
+    }
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = s.open("comb.pdf", None, Arc::new(one_line_page("/Font << /F1 4 0 R >>", &body)), None).unwrap();
+    let found: Vec<(String, pdfcraft_forms::detect::Kind)> = s.detect_fields(id, &[]).into_iter().map(|(_, c)| (c.name, c.kind)).collect();
+    assert_eq!(
+        found,
+        [
+            ("Postcode A".to_string(), pdfcraft_forms::detect::Kind::Comb { cells: 5 }),
+            ("Postcode B".to_string(), pdfcraft_forms::detect::Kind::Comb { cells: 10 })
+        ]
+    );
+    s.auto_detect_fields(id, &[]).unwrap();
+    let d = s.get(id).unwrap();
+    let combs: Vec<(&str, FormFieldKind, bool, Option<usize>)> =
+        d.form.iter().map(|f| (f.name.as_str(), f.kind, f.has(pdfcraft_forms::flags::COMB), f.max_len)).collect();
+    assert_eq!(combs, [("Postcode A", FormFieldKind::Text, true, Some(5)), ("Postcode B", FormFieldKind::Text, true, Some(10))]);
+    assert_eq!(d.can_undo(), Some("Detect form fields"));
 }
 
 #[test]
@@ -5800,4 +5978,89 @@ fn cropping_an_existing_image_clips_it_and_moves_with_it() {
     assert!(v.iter().zip(shown.iter()).all(|(a, b)| (a - b).abs() < 0.01), "{v:?} vs {shown:?}");
     // No area, or a box off the image, is refused.
     assert!(s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Crop([10.0, 10.0, 10.0, 50.0]) }).is_err());
+}
+
+/// A 60 x 20 JPEG at 144 x 72 dpi, tagged with EXIF Orientation 6 (shown turned 90 degrees clockwise).
+fn phone_jpeg() -> Vec<u8> {
+    use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
+    let mut jpeg = Vec::new();
+    let mut encoder = JpegEncoder::new(&mut jpeg);
+    encoder.set_pixel_density(PixelDensity { density: (144, 72), unit: PixelDensityUnit::Inches });
+    encoder.encode_image(&image::RgbImage::from_pixel(60, 20, image::Rgb([20, 20, 20]))).unwrap();
+    let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    exif.extend_from_slice(&[6, 0, 0, 0, 0, 0, 0, 0]);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&exif);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+#[test]
+fn a_phone_photo_used_as_a_custom_stamp_is_embedded_upright() {
+    let mut session = Session::new();
+    let blank = session.create_blank(300.0, 400.0, 1).unwrap();
+    let id = session.open_new("form.pdf", blank).unwrap();
+    // A click places the stamp at its natural size: 30 x 20 pt as stored, 20 x 30 pt upright.
+    // Named "Signature" so `signature_image` finds its picture.
+    let file = MarkFile { name: "photo.jpg".into(), bytes: Arc::new(phone_jpeg()), page: 0 };
+    let stamp = Edit::AddCustomStamp { page: 0, rect: [100.0, 100.0, 100.0, 100.0], name: "Signature".into(), file, author: "Ada".into() };
+    session.apply(id, stamp).unwrap();
+    let cos = &session.get(id).unwrap().editor.as_ref().unwrap().cos;
+    let picture = pdfcraft_annot::signature_image(cos, 0, 0).unwrap().unwrap();
+    let obj = cos.get(picture);
+    let pdfcraft_cos::Object::Stream(s) = &*obj else { panic!() };
+    assert_eq!((s.dict.int(b"Width"), s.dict.int(b"Height")), (Some(20), Some(60)));
+    let rect = pdfcraft_annot::summaries(cos)[0].rect;
+    assert!(((rect[2] - rect[0]) - 20.0).abs() < 0.01 && ((rect[3] - rect[1]) - 30.0).abs() < 0.01, "{rect:?}");
+}
+
+/// Opening a paragraph and applying its edit read the page's text blocks; after an edit they are
+/// still read once per document state, and undo and redo never get another state's blocks.
+#[test]
+fn text_blocks_stay_cached_after_an_edit_and_follow_undo_and_redo() {
+    let (mut session, id) = session_with(1);
+    let blocks = |s: &Session| s.get(id).unwrap().editor.as_ref().unwrap().text_blocks(0).unwrap();
+    let before = blocks(&session);
+    assert_eq!(before[0].editor_text, "Page 1");
+    let edit = Edit::EditTextBlock { page: 0, block: 0, text: "Edited".into(), style: pdfcraft_edit::BlockStyle::default() };
+    session.apply(id, edit).unwrap();
+    let edited = blocks(&session);
+    assert_eq!(edited[0].editor_text, "Edited");
+    assert!(Arc::ptr_eq(&edited, &blocks(&session)), "the edited page is grouped once");
+    session.undo(id).unwrap();
+    assert_eq!(blocks(&session)[0].editor_text, "Page 1");
+    session.redo(id).unwrap();
+    let redone = blocks(&session);
+    assert_eq!(redone[0].editor_text, "Edited");
+    assert!(Arc::ptr_eq(&redone, &blocks(&session)));
+}
+
+/// A new document, or one restored from recovery, has never been written where it belongs: undo
+/// back to the bytes it was opened from must not make it clean, or closing it would discard the
+/// whole document without asking. Saving makes it clean; Revert of a saved one too.
+#[test]
+fn undo_never_makes_an_unsaved_document_clean() {
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let new = s.open_new("Combined.pdf", Arc::new(fixture(2))).unwrap();
+    s.apply(new, Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+    s.undo(new).unwrap();
+    assert!(s.get(new).unwrap().dirty, "a new document is unsaved until it is saved");
+    assert_eq!(s.autosave_snapshots().len(), 1, "and still needs recovery");
+    s.revert(new).unwrap();
+    assert!(s.get(new).unwrap().dirty, "Revert goes back to the created bytes, which aren't saved anywhere");
+
+    let recovered = s.open("Report.pdf", None, Arc::new(fixture(2)), None).unwrap();
+    s.mark_recovered(recovered, Some("Report.pdf".into()));
+    s.apply(recovered, Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+    s.undo(recovered).unwrap();
+    assert!(s.get(recovered).unwrap().dirty, "the recovered work was never saved");
+
+    let saved = s.save_bytes(new).unwrap();
+    s.mark_saved(new, saved, Some("Combined.pdf".into())).unwrap();
+    assert!(!s.get(new).unwrap().dirty);
+    s.apply(new, Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+    s.undo(new).unwrap();
+    assert!(!s.get(new).unwrap().dirty, "once saved, undo back to the saved state is clean");
 }

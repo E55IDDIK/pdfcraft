@@ -80,13 +80,19 @@ pub fn wrap_with(text: &str, size: f64, width: f64, measure: impl Fn(&str, f64) 
     let mut lines = Vec::new();
     for para in text.split(['\n', '\r']) {
         let mut line = String::new();
+        // No word is on the line yet; an empty word (a leading space) still starts it.
+        let mut fresh = true;
         for word in para.split(' ') {
-            let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if measure(&candidate, size) <= width || line.is_empty() && measure(word, size) <= width {
+            let candidate = if fresh { word.to_string() } else { format!("{line} {word}") };
+            if measure(&candidate, size) <= width || fresh && measure(word, size) <= width {
                 line = candidate;
+                fresh = false;
                 continue;
             }
-            if !line.is_empty() {
+            // Indentation alone is not a line: drop it before an over-long word.
+            if line.trim().is_empty() {
+                line.clear();
+            } else {
                 lines.push(std::mem::take(&mut line));
             }
             for ch in word.chars() {
@@ -95,6 +101,7 @@ pub fn wrap_with(text: &str, size: f64, width: f64, measure: impl Fn(&str, f64) 
                 }
                 line.push(ch);
             }
+            fresh = line.is_empty();
         }
         lines.push(line);
     }
@@ -255,6 +262,20 @@ pub fn literal(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_keeps_leading_spaces() {
+        assert_eq!(wrap("    indented", 11.0, 500.0), ["    indented"]);
+        assert_eq!(wrap("  a b\n c", 11.0, 500.0), ["  a b", " c"]);
+        assert_eq!(wrap("", 11.0, 500.0), [""]);
+        // A single leading space before a word that must be broken leaves no blank first line.
+        let broken = wrap(" abcdefghijklmnopqrstuvwxyz", 11.0, 40.0);
+        assert!(broken.len() > 1 && broken.iter().all(|l| !l.is_empty()), "{broken:?}");
+        // So does indentation of two or more spaces: no whitespace-only line, same as one space.
+        let broken = wrap("  abcdefghijklmnopqrstuvwxyz", 11.0, 40.0);
+        assert!(broken.len() > 1 && broken.iter().all(|l| !l.trim().is_empty()), "{broken:?}");
+        assert_eq!(broken, wrap(" abcdefghijklmnopqrstuvwxyz", 11.0, 40.0));
+    }
 
     #[test]
     fn win_ansi_encodability_matches_the_encoder() {

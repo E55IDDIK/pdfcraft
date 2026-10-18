@@ -138,7 +138,7 @@ impl Automation {
             .added()
             .iter()
             .filter(|x| x.page == page)
-            .nth((index - 1).max(0) as usize)
+            .nth(usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX))
             .filter(|_| index >= 1)
             .ok_or_else(|| failed(format!("page {} has no added item {index} (see content_list)", page + 1)))?;
         Ok((page, index as usize - 1, it.content.clone(), ph))

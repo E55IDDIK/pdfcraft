@@ -126,13 +126,13 @@ fn image(doc: &Document, s: &Stream) -> Result<(&'static str, Vec<u8>), String> 
     // A stencil mask (`ImageMask true`) has no /SMask or /Mask of its own (8.9.6.2).
     let mut alpha = if mask { None } else { soft_mask(doc, s, w, h).or_else(|| stencil_mask(doc, s, w, h)) };
     let key = if mask { None } else { colour_key(doc, s) };
-    // Decode arrays: only inversion ([1 0] per component) is honoured, the common case.
-    let inverted = s
-        .dict
-        .get(b"Decode")
-        .map(|d| doc.resolve(d))
-        .and_then(|d| d.as_array().map(|a| a.first().and_then(Object::as_f64) > a.get(1).and_then(Object::as_f64)))
-        .unwrap_or(false);
+    // Keep the existing JPEG and stencil-mask Decode handling separate from lossless colour images.
+    let inverted = (jpeg || mask)
+        && s.dict
+            .get(b"Decode")
+            .map(|d| doc.resolve(d))
+            .and_then(|d| d.as_array().map(|a| a.first().and_then(Object::as_f64) > a.get(1).and_then(Object::as_f64)))
+            .unwrap_or(false);
     // In a PDF a CMYK JPEG's samples are ink amounts unless /Decode inverts them, while image
     // viewers read a CMYK JPEG file as inverted (Adobe's convention): as is, it would show as
     // a negative.
@@ -161,6 +161,7 @@ fn image(doc: &Document, s: &Stream) -> Result<(&'static str, Vec<u8>), String> 
         (unpack(&data, w, h, space.components(), bpc).ok_or("the image data is shorter than its size says")?, bpc)
     };
     let n = space.components();
+    let decode = if jpeg || mask { None } else { decode(doc, s, n) };
     if alpha.is_none() {
         alpha = key.and_then(|k| keyed_alpha(&samples, n, bpc, &k));
     }
@@ -168,10 +169,21 @@ fn image(doc: &Document, s: &Stream) -> Result<(&'static str, Vec<u8>), String> 
         return as_is();
     }
     let invert = inverted ^ mask; // a stencil mask paints its 0 samples
+    // `unpack` keeps only the high byte at 16 bits, so Decode uses an effective maximum of 255 too.
     let max = (1u32 << bpc.min(8)) - 1;
     let mut rgb = Vec::with_capacity(w * h * 3);
     for px in samples.chunks_exact(n) {
+        let decoded = |i: usize| {
+            decode.as_ref().and_then(|pairs| pairs.get(i)).map(|&[lo, hi]| {
+                let t = f64::from(px.get(i).copied().unwrap_or(0)) / f64::from(max);
+                // Avoid overflowing hi - lo for finite endpoints with opposite signs.
+                (1.0 - t) * lo + t * hi
+            })
+        };
         let v = |i: usize| {
+            if let Some(value) = decoded(i) {
+                return (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
             let x = (px.get(i).copied().unwrap_or(0) as u32 * 255 / max) as u8;
             if invert { 255 - x } else { x }
         };
@@ -180,8 +192,12 @@ fn image(doc: &Document, s: &Stream) -> Result<(&'static str, Vec<u8>), String> 
             Space::Rgb => rgb.extend_from_slice(&[v(0), v(1), v(2)]),
             Space::Cmyk => rgb.extend_from_slice(&cmyk(v(0), v(1), v(2), v(3))),
             Space::Indexed(base, hival, table) => {
-                // Indexed samples outside the declared range use the nearest endpoint (ISO 32000-1, 8.6.6.3).
-                let i = px.first().copied().unwrap_or(0).min(*hival) as usize;
+                // Explicit Decode maps into index units, rounded then clipped (8.6.6.3).
+                // Without Decode, retain raw indices rather than normalizing to hival.
+                let i = match decoded(0) {
+                    Some(value) => value.round().clamp(0.0, f64::from(*hival)) as usize,
+                    None => px.first().copied().unwrap_or(0).min(*hival) as usize,
+                };
                 let k = base.components();
                 let e = table.get(i * k..i * k + k).unwrap_or(&[0, 0, 0, 0][..k]);
                 rgb.extend_from_slice(&match **base {
@@ -196,6 +212,24 @@ fn image(doc: &Document, s: &Stream) -> Result<(&'static str, Vec<u8>), String> 
         unpremultiply(&mut rgb, a, matte);
     }
     png(w as u32, h as u32, &rgb, alpha.as_deref()).map(|p| ("png", p))
+}
+
+/// The explicit Decode intervals for a lossless colour image (8.9.5.2, Table 90).
+///
+/// A malformed array (not an array, the wrong length, a non-number or non-finite entry) gives
+/// the default mapping, so the image still exports.
+fn decode(doc: &Document, s: &Stream, n: usize) -> Option<Vec<[f64; 2]>> {
+    let value = doc.resolve(s.dict.get(b"Decode")?);
+    let values = value.as_array()?;
+    if Some(values.len()) != n.checked_mul(2) {
+        return None;
+    }
+    let endpoint = |value: &Object| doc.resolve(value).as_f64().filter(|v| v.is_finite());
+    let mut pairs = Vec::with_capacity(n);
+    for [lo, hi] in values.as_chunks::<2>().0 {
+        pairs.push([endpoint(lo)?, endpoint(hi)?]);
+    }
+    Some(pairs)
 }
 
 /// Width and height as sizes, when both are positive and the image is at most `MAX_PIXELS`.

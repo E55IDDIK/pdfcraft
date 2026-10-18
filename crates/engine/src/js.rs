@@ -6,7 +6,7 @@
 //! Preferences ▸ JavaScript ▸ Enable Acrobat JavaScript is [`Session::set_javascript`]; with it
 //! off, scripts don't run and AF calls keep working natively.
 
-use pdfcraft_forms::{Field, FieldChange, FieldEvent, FieldKind, ScriptResult, Scripts};
+use pdfcraft_forms::{Field, FieldChange, FieldEvent, FieldKind, FieldProps, ScriptResult, Scripts};
 pub use pdfcraft_js::{Limits, Outcome, Request};
 
 use crate::{DocId, Edit, EditError, Session};
@@ -343,19 +343,24 @@ impl Session {
         let names = found.iter().map(|(_, c, _)| c.name.clone()).collect();
         let mut edits = Vec::with_capacity(found.len());
         for (page, c, turn) in found {
-            // A turned field keeps its place: the rectangle is already the one on the page.
-            let props = (turn != 0).then(|| pdfcraft_forms::FieldProps { rotation: Some((0, turn)), rect: Some((0, c.rect)), ..Default::default() });
             let tall = if turn % 180 == 0 { c.rect[3] - c.rect[1] } else { c.rect[2] - c.rect[0] };
-            edits.push(Edit::AddField {
-                page,
-                rect: c.rect,
-                kind: match c.kind {
-                    pdfcraft_forms::detect::Kind::Text => pdfcraft_forms::NewField::Text { multiline: tall > 30.0 },
-                    pdfcraft_forms::detect::Kind::CheckBox => pdfcraft_forms::NewField::CheckBox,
-                },
-                name: Some(c.name.clone()),
-            });
-            if let Some(props) = props {
+            let (kind, comb) = match c.kind {
+                pdfcraft_forms::detect::Kind::Text => (pdfcraft_forms::NewField::Text { multiline: tall > 30.0 }, None),
+                pdfcraft_forms::detect::Kind::CheckBox => (pdfcraft_forms::NewField::CheckBox, None),
+                pdfcraft_forms::detect::Kind::Comb { cells } => (pdfcraft_forms::NewField::Text { multiline: false }, Some(cells)),
+            };
+            let mut props = FieldProps::default();
+            if turn != 0 {
+                // A turned field keeps its place: the rectangle is already the one on the page.
+                props.rotation = Some((0, turn));
+                props.rect = Some((0, c.rect));
+            }
+            if let Some(cells) = comb {
+                props.max_len = Some(Some(cells));
+                props.flags = vec![(pdfcraft_forms::flags::COMB, true)];
+            }
+            edits.push(Edit::AddField { page, rect: c.rect, kind, name: Some(c.name.clone()) });
+            if turn != 0 || comb.is_some() {
                 edits.push(Edit::SetFieldProps { name: c.name, props: Box::new(props) });
             }
         }

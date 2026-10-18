@@ -175,6 +175,36 @@ fn find_shortcuts_advance_and_retreat_matches() {
     assert_eq!(h.state().views[0].find.as_ref().unwrap().current, Some((start + n - 1) % n));
 }
 
+/// #2669: ⌘G and ⇧⌘G step through the matches while the find field still has the focus.
+#[test]
+fn find_shortcuts_work_from_the_find_field() {
+    let mut h = harness();
+    h.state_mut().active = Some(0);
+    h.run_steps(2);
+    h.state_mut().views[0].open_find();
+    h.state_mut().views[0].find.as_mut().unwrap().query = "page".into();
+    h.state_mut().views[0].rerun_find();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if h.state().views[0].find.as_ref().unwrap().matches.len() >= 15 {
+            break;
+        }
+    }
+    let n = h.state().views[0].find.as_ref().unwrap().matches.len();
+    assert_eq!(n, 15);
+    assert!(h.ctx.egui_wants_keyboard_input(), "the find field has the focus");
+    let start = h.state().views[0].find.as_ref().unwrap().current.unwrap();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::G);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().current, Some((start + 1) % n));
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::G);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().current, Some(start));
+    assert!(h.ctx.egui_wants_keyboard_input(), "and keeps it");
+}
+
 #[test]
 fn marking_while_searching_does_not_jitter_or_reset_search_state() {
     let mut h = harness();
@@ -903,6 +933,70 @@ fn an_earlier_revision_opens_from_document_properties() {
 }
 
 #[test]
+fn wrapped_revision_buttons_stay_above_binding_and_open_the_saved_revision() {
+    use pdfcraft_engine::{Edit, Session};
+    let mut bytes = std::sync::Arc::new(fixture(1));
+    // Reopen each save so the next edit appends to the preceding saved revision.
+    for revision in 2..=13 {
+        let mut source = Session::new().with_clock(|| 1_700_000_000);
+        let id = source.open("revisions.pdf", None, bytes, None).unwrap();
+        source.apply(id, Edit::SetInfo { key: "Title".into(), value: format!("Revision {revision}") }).unwrap();
+        bytes = source.save_bytes(id).unwrap();
+    }
+    for width in [1400.0, 720.0] {
+        let pdf = bytes.clone();
+        let mut h = Harness::builder().with_size(egui::vec2(width, 900.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("revisions.pdf", None, pdf.to_vec()).unwrap();
+            app
+        });
+        let s = h.state();
+        let doc = s.session.get(s.views[s.active.unwrap()].id).unwrap();
+        assert_eq!(doc.revision_ends().len(), 13, "the fixture contains thirteen saved revisions");
+        h.state_mut().dialog = Some(Dialog::Properties(pdfcraft_ui_egui::PropsTab::Advanced));
+        // Let the grid and the centered dialog settle before measuring or clicking.
+        h.run_steps(6);
+        let buttons: Vec<_> = (1..13).map(|n| (n, h.get_by_label(&format!("View revision {n}")).rect())).collect();
+        let first_row = h.get_by_label("View revision 12").rect();
+        let lower_revision = buttons
+            .iter()
+            .find(|(n, rect)| *n > 1 && rect.top() > first_row.bottom())
+            .map(|(n, _)| *n)
+            .expect("revision buttons wrap to a lower row");
+        let binding = h.get_by_label("Binding").rect();
+        let left = h.get_by_label("Left Edge").rect();
+        let right = h.get_by_label("Right Edge").rect();
+        // Properties requests a fixed width. Measure its card in each viewport.
+        let card = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("dialog").with("card"))).expect("Properties is shown");
+        for (n, rect) in &buttons {
+            for (label, below) in [("Binding", binding), ("Left Edge", left), ("Right Edge", right)] {
+                assert!(rect.bottom() <= below.top(), "revision {n} overlaps {label} at viewport width {width}: {rect:?}, {below:?}");
+            }
+        }
+        for (n, rect) in &buttons {
+            assert!(
+                rect.left() >= card.left() && rect.right() <= card.right(),
+                "revision {n} escapes Properties horizontally at viewport width {width}: {rect:?}, measured card {card:?}"
+            );
+        }
+        h.get_by_label(&format!("View revision {lower_revision}")).scroll_to_me();
+        h.run_steps(3);
+        h.get_by_label(&format!("View revision {lower_revision}")).click();
+        h.run_steps(3);
+        let s = h.state();
+        assert!(s.dialog.is_none(), "opening a revision closes Properties");
+        let view = &s.views[s.active.unwrap()];
+        let doc = s.session.get(view.id).unwrap();
+        assert_eq!(doc.name, format!("revisions (revision {lower_revision}).pdf"));
+        assert_eq!(doc.info_value("Title"), Some(format!("Revision {lower_revision}")));
+        let snapshot = view.snapshot.as_ref().expect("the saved revision opens as a snapshot");
+        assert_eq!(snapshot.kind, pdfcraft_ui_egui::canvas::SnapshotKind::Revision);
+        assert_eq!(snapshot.revision, lower_revision);
+    }
+}
+
+#[test]
 fn advanced_search_lists_results_with_context() {
     let mut h = harness();
     let i = h.state().active.unwrap();
@@ -1304,6 +1398,70 @@ fn pages_panel_thumbnails_have_a_context_menu() {
     assert_eq!(h.state().page_clipboard.as_ref().map(|c| c.pages.clone()), Some(vec![2]));
 }
 
+/// Where the Pages panel draws page `n`'s thumbnail.
+fn thumbnail_rect(h: &Harness<'static, PdfCraftApp>, n: usize) -> egui::Rect {
+    h.get_all_by_label(&format!("Page {n}")).find(|t| t.rect().left() > 1000.0).expect("the Pages panel thumbnail").rect()
+}
+
+/// Whether `r` lies wholly in the part of the Pages panel in view.
+fn in_panel_view(h: &Harness<'static, PdfCraftApp>, r: egui::Rect) -> bool {
+    h.state().views[0].pages_panel.expect("the Pages panel is shown").contains_rect(r)
+}
+
+/// #2781: as in Acrobat, going to a page whose thumbnail is out of sight scrolls the Pages
+/// panel to show it.
+#[test]
+fn going_to_a_far_page_scrolls_its_thumbnail_into_view() {
+    let mut h = pages_panel_harness(&[(200, 300); 30]);
+    assert!(!in_panel_view(&h, thumbnail_rect(&h, 25)), "page 25 starts out of sight");
+    h.state_mut().views[0].go_to_page(24);
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].current, 24);
+    assert!(in_panel_view(&h, thumbnail_rect(&h, 25)), "page 25's thumbnail is shown");
+}
+
+/// #2781: a page whose thumbnail is already in view leaves the panel where it is, rather than
+/// centring the thumbnail on every page change.
+#[test]
+fn going_to_a_page_in_view_leaves_the_pages_panel_still() {
+    // Landscape pages, so several thumbnails share the panel.
+    let mut h = pages_panel_harness(&[(300, 200); 30]);
+    h.state_mut().views[0].go_to_page(14);
+    h.run_steps(4);
+    let clip = h.state().views[0].pages_panel.expect("the Pages panel is shown");
+    // The topmost thumbnail wholly in view, other than the current page's.
+    let (n, before) =
+        (1..=30).map(|n| (n, thumbnail_rect(&h, n))).find(|(n, r)| *n != 15 && in_panel_view(&h, *r)).expect("another thumbnail in view");
+    assert!(
+        (before.center().y - clip.center().y).abs() > 50.0,
+        "page {n} at {before:?} is away from the middle of {clip:?}, where centring would move it"
+    );
+    h.state_mut().views[0].go_to_page(n - 1);
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].current, n - 1);
+    assert_eq!(thumbnail_rect(&h, n), before, "page {n}'s thumbnail stayed put");
+}
+
+/// #2781: while the user drags thumbnails, a page change does not pull the panel away from
+/// where they are being dropped.
+#[test]
+fn a_page_change_while_thumbnails_are_dragged_does_not_scroll_the_pages_panel() {
+    let mut h = pages_panel_harness(&[(200, 300); 30]);
+    let first = thumbnail_rect(&h, 1);
+    let at = first.center();
+    h.hover_at(at);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(1);
+    h.hover_at(at + egui::vec2(0.0, 30.0));
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].panel_drag, Some(vec![0]), "page 1 is being dragged");
+    h.state_mut().views[0].go_to_page(24);
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].current, 24);
+    assert_eq!(thumbnail_rect(&h, 1), first, "the panel stays put under the drag");
+}
+
 /// #444, #186: a mouse-wheel notch scrolls as far as the scroll speed preference says;
 /// trackpad (point) scrolling keeps its own speed. The choice is saved.
 #[test]
@@ -1381,6 +1539,55 @@ fn a_clicked_picture_is_selected_and_copied_in_its_original_format() {
     // Escape deselects.
     h.key_press(egui::Key::Escape);
     h.run_steps(1);
+    assert_eq!(h.state().views[i].picked_image, None);
+}
+
+/// A picture picked with the Select tool, then deleted in Edit text & images, leaves no highlight
+/// behind on the empty spot where it was.
+#[test]
+fn a_picked_picture_that_is_deleted_in_edit_mode_loses_its_highlight() {
+    let (_, mut h) = picture_harness();
+    let i = h.state().active.unwrap();
+    let id = h.state().views[i].id;
+    let at = h.state().views[i].page_screen_rect(0).expect("on screen").center();
+    h.hover_at(at);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(h.state().views[i].picked_image.is_some(), "picked with the Select tool");
+    // Edit text & images: click the picture, delete it with the Delete key.
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    h.hover_at(at);
+    h.run_steps(1);
+    h.drag_at(at);
+    h.run_steps(1);
+    h.drop_at(at);
+    h.run_steps(2);
+    h.key_press(egui::Key::Delete);
+    // One frame, no more input: the highlight goes at once, it does not wait for a click.
+    h.run_steps(1);
+    assert!(h.state().session.get(id).unwrap().page_images(0).is_empty(), "the picture is gone");
+    assert_eq!(h.state().views[i].picked_image, None, "and so is its highlight");
+}
+
+/// The highlight goes in the very edit that removes the picture, not on a later frame: the window
+/// only redraws on the next input, so waiting for one leaves the highlight on screen until a click.
+#[test]
+fn an_edit_clears_the_picked_picture_at_once() {
+    let (_, mut h) = picture_harness();
+    let i = h.state().active.unwrap();
+    let at = h.state().views[i].page_screen_rect(0).expect("on screen").center();
+    h.hover_at(at);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(h.state().views[i].picked_image.is_some(), "picked with the Select tool");
+    let delete = pdfcraft_engine::Edit::EditPageImage { page: 0, index: 0, change: pdfcraft_engine::ImageEdit::Delete };
+    assert!(h.state_mut().apply_edit(delete));
+    // No frame has run since the edit.
     assert_eq!(h.state().views[i].picked_image, None);
 }
 
@@ -1780,4 +1987,28 @@ fn arrow_keys_follow_the_scroll_speed_preference() {
     };
     let (slow, normal, fast) = (lines_to_page_2("slow"), lines_to_page_2("normal"), lines_to_page_2("fast"));
     assert!(fast * 3 < normal * 2 && normal * 3 < slow * 2, "presses to page 2: slow {slow}, normal {normal}, fast {fast}");
+}
+
+/// #2665: next to a very wide page the normal pages sit far to its right, outside the window.
+/// Going to one changed the page counter but kept the horizontal scroll, so it stayed out of
+/// sight; as in Acrobat, it is brought into view.
+#[test]
+fn go_to_page_brings_the_page_into_view_horizontally() {
+    use pdfcraft_ui_egui::canvas::Fit;
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("wide.pdf", None, sized_fixture(&[(595, 842), (595, 842), (595, 842), (6000, 2000)])).unwrap();
+        app.views[0].fit = Fit::None;
+        app.views[0].zoom = 1.0;
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state().views[0].page_screen_rect(0).is_none(), "page 1 starts off-screen, right of the window");
+    h.state_mut().views[0].go_to_page(2);
+    h.run_steps(4);
+    let v = &h.state().views[0];
+    assert_eq!(v.current, 2);
+    let (r, vp) = (v.page_screen_rect(2).expect("page 3 on screen"), v.viewport_rect());
+    assert!(r.left() >= vp.left() && r.right() <= vp.right(), "page 3 at {r:?}, viewport {vp:?}");
 }

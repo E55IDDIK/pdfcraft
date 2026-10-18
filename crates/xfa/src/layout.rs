@@ -232,6 +232,7 @@ pub fn layout(tpl: &Template, data: Option<&DataNode>) -> Result<Form, XfaError>
             content: vec![Rect::new(36.0, 36.0, 540.0, 720.0)],
             items: Vec::new(),
             occur_max: None,
+            occur_min: 0,
         }],
     };
     let mut values = HashMap::new();
@@ -261,6 +262,7 @@ pub fn layout(tpl: &Template, data: Option<&DataNode>) -> Result<Form, XfaError>
     if tpl.root.common.presence.occupies() {
         l.flow_subform(&root_node, None, &ctx, 0, 0)?;
     }
+    l.satisfy_page_area_minimums()?;
     l.check_measures()?;
     let total = l.pages.len();
     let count = total.to_string();
@@ -497,11 +499,28 @@ impl Layouter<'_> {
     // ───────────────────────────────────────────────────────────────────────── pages
 
     fn new_page(&mut self) -> Result<(), XfaError> {
+        let idx =
+            (0..self.areas.len()).find(|&i| self.areas[i].occur_max.is_none_or(|m| self.uses[i] < m)).unwrap_or(self.areas.len().saturating_sub(1));
+        self.new_page_of(idx)
+    }
+
+    /// Once the body has been laid out, give every page area that has been used fewer times than
+    /// its `occur min` the pages it still needs, in template order, after the body's pages.
+    fn satisfy_page_area_minimums(&mut self) -> Result<(), XfaError> {
+        let areas = Rc::clone(&self.areas);
+        for (idx, area) in areas.iter().enumerate() {
+            while self.uses.get(idx).is_some_and(|u| *u < area.occur_min) {
+                self.new_page_of(idx)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Start a page from page area `idx`.
+    fn new_page_of(&mut self, idx: usize) -> Result<(), XfaError> {
         if self.pages.len() >= MAX_PAGES {
             return Err(XfaError::TooLarge(format!("the form lays out to more than {MAX_PAGES} pages")));
         }
-        let idx =
-            (0..self.areas.len()).find(|&i| self.areas[i].occur_max.is_none_or(|m| self.uses[i] < m)).unwrap_or(self.areas.len().saturating_sub(1));
         let areas = Rc::clone(&self.areas);
         let Some(area) = areas.get(idx) else {
             return Err(XfaError::Malformed("the template has no page area".into()));

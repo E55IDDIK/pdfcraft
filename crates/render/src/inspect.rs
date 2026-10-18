@@ -56,6 +56,9 @@ pub struct DocInfo {
     pub keywords: Option<String>,
     pub creator: Option<String>,
     pub producer: Option<String>,
+    /// Custom document properties: `/Info` entries with a key the spec does not name and a text
+    /// value, as (name, text), in the dictionary's order (at most 256).
+    pub custom: Vec<(String, String)>,
     pub pdf_version: String,
     pub file_size: usize,
     pub encrypted: bool,
@@ -616,6 +619,23 @@ impl<'a> Inspector<'a> {
             info.keywords = self.text(d, b"Keywords");
             info.creator = self.text(d, b"Creator");
             info.producer = self.text(d, b"Producer");
+            const STANDARD: [&[u8]; 9] =
+                [b"Title", b"Author", b"Subject", b"Keywords", b"Creator", b"Producer", b"CreationDate", b"ModDate", b"Trapped"];
+            // The same rule as the engine's list after an edit (`pdfcraft_organize::custom_info`,
+            // trimmed and without empty values): text strings only, so a name value is not a
+            // custom property, and the cap counts listed entries.
+            info.custom = d
+                .iter()
+                .filter(|(k, _)| !STANDARD.contains(&k.as_slice()))
+                .filter_map(|(k, v)| match self.resolve(v) {
+                    Object::String(bytes, _) => {
+                        let v = text_string(bytes).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string();
+                        (!v.is_empty()).then(|| (String::from_utf8_lossy(k).into_owned(), v))
+                    }
+                    _ => None,
+                })
+                .take(256)
+                .collect();
         }
         let Ok(catalog) = self.doc.catalog() else { return };
         info.tagged = catalog
@@ -677,6 +697,12 @@ impl<'a> Inspector<'a> {
                 }
             }
             info.has_javascript |= names.get(b"JavaScript").is_ok();
+        }
+        if let Ok(action) = catalog.get(b"OpenAction")
+            && let Some(dict) = self.dict(action)
+            && dict.get(b"S").ok().and_then(|o| self.resolve(o).as_name().ok()) == Some(&b"JavaScript"[..])
+        {
+            info.has_javascript = true;
         }
     }
 
@@ -2302,6 +2328,27 @@ trailer << /Root 1 0 R >>
         );
     }
 
+    const CUSTOM_INFO: &[u8] = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R >> endobj
+4 0 obj << /Title (Report) /Producer (Test) /Project (Apollo) /Revision 7 /Dept (R&D) /Trapped /False /Note <FEFF90E8> >> endobj
+trailer << /Root 1 0 R /Info 4 0 R >>
+%%EOF";
+
+    #[test]
+    fn custom_document_properties_are_listed_apart_from_the_standard_ones() {
+        let info = inspect(Arc::new(CUSTOM_INFO.to_vec()), None).expect("opens");
+        assert_eq!((info.title.as_deref(), info.producer.as_deref()), (Some("Report"), Some("Test")));
+        let mut custom = info.custom.clone();
+        custom.sort();
+        // Revision is a number, not text, so it is not listed; Trapped is a standard entry.
+        assert_eq!(
+            custom,
+            [("Dept".to_string(), "R&D".to_string()), ("Note".to_string(), "部".to_string()), ("Project".to_string(), "Apollo".to_string())]
+        );
+    }
+
     #[test]
     fn radio_button_layer_groups_are_read() {
         let info = inspect(Arc::new(LAYERS.to_vec()), None).expect("opens");
@@ -2980,5 +3027,51 @@ trailer << /Size 7 /Root 1 0 R >>
         let f = font(&info.fonts, "SomeHouseSans");
         assert!(f.embedded && f.subset, "{f:?}");
         assert_eq!((f.substitute.as_deref(), f.substitution.as_deref()), (None, None), "the document's own glyphs are shown");
+    }
+}
+
+#[cfg(test)]
+mod open_action_javascript_tests {
+    use std::sync::Arc;
+
+    use super::inspect;
+
+    /// One-page PDF whose catalog points its /OpenAction at object 4 (written by the caller).
+    fn pdf_with_open_action(action: &[u8]) -> Vec<u8> {
+        let objs: Vec<&[u8]> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            action,
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend_from_slice(o);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        out
+    }
+
+    #[test]
+    fn open_action_javascript_sets_has_javascript() {
+        let bytes = pdf_with_open_action(b"<< /S /JavaScript /JS (app.alert('hi')) >>");
+        let info = inspect(Arc::new(bytes), None).expect("inspects");
+        assert!(info.has_javascript, "an /OpenAction /JavaScript is JavaScript");
+    }
+
+    #[test]
+    fn open_action_goto_does_not_set_has_javascript() {
+        let bytes = pdf_with_open_action(b"<< /S /GoTo /D [3 0 R /Fit] >>");
+        let info = inspect(Arc::new(bytes), None).expect("inspects");
+        assert!(!info.has_javascript, "a /GoTo /OpenAction is not JavaScript");
     }
 }

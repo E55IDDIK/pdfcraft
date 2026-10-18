@@ -680,6 +680,9 @@ pub struct PageArea {
     pub items: Vec<Node>,
     /// How many pages may use this master (`None`: unbounded).
     pub occur_max: Option<usize>,
+    /// How many pages must use this master: a layout that ends with fewer adds pages for it.
+    /// Zero without an `<occur>`.
+    pub occur_min: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

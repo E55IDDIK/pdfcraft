@@ -82,6 +82,8 @@ struct XrefSection {
     row_count: usize,
     max_num: u32,
     has_entries: bool,
+    /// A table subsection was read one number lower than it says ([`subsection_start`]).
+    renumbered: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -307,6 +309,10 @@ pub struct Revision {
     pub xref_offset: u64,
     /// `true` if the section is a cross-reference stream.
     pub is_stream: bool,
+    /// `true` if `xref_offset` counts from the `%PDF-` header rather than from the start of the
+    /// file. The two differ only in a file with bytes before its header, and an update appended
+    /// to such a file must count the same way as the section it points back to.
+    pub header_relative: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -336,6 +342,40 @@ impl PartialEq for SourceIdentity {
 }
 
 impl Eq for SourceIdentity {}
+
+/// What a document reads as: its source ([`SourceIdentity`]), its trailer and every object changed
+/// since it was opened. A clone, or a snapshot that undo restores, has the same state, and every
+/// change makes a different one. Changed objects are compared as allocations, which the state
+/// keeps alive, so a later object can't take an address one of them had.
+#[derive(Clone)]
+pub struct ReadState {
+    source: SourceIdentity,
+    trailer: Dict,
+    overlay: BTreeMap<u32, Slot>,
+}
+
+impl ReadState {
+    /// Whether `doc` reads as this state.
+    pub fn matches(&self, doc: &Document) -> bool {
+        self.source == doc.source_identity()
+            && self.trailer == doc.trailer
+            && self.overlay.len() == doc.overlay.len()
+            && self.overlay.iter().zip(&doc.overlay).all(|((a, x), (b, y))| {
+                a == b
+                    && match (x, y) {
+                        (Slot::Set(g, o), Slot::Set(h, p)) => g == h && Arc::ptr_eq(o, p),
+                        (Slot::Freed(g), Slot::Freed(h)) => g == h,
+                        _ => false,
+                    }
+            })
+    }
+}
+
+impl std::fmt::Debug for ReadState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadState").field("changed_objects", &self.overlay.len()).finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone)]
 pub struct Document {
@@ -801,6 +841,12 @@ impl Document {
         SourceIdentity(Arc::downgrade(&self.source_identity))
     }
 
+    /// What the document reads as now (see [`ReadState`]): unlike [`Self::source_identity`], it
+    /// changes with every edit, so a value derived from the document can be cached against it.
+    pub fn read_state(&self) -> ReadState {
+        ReadState { source: self.source_identity(), trailer: self.trailer.clone(), overlay: self.overlay.clone() }
+    }
+
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -815,6 +861,19 @@ impl Document {
 
     pub fn revisions(&self) -> &[Revision] {
         &self.revisions
+    }
+
+    /// Position of the `%PDF-` header in the file: 0 unless bytes come before it.
+    pub fn header_offset(&self) -> usize {
+        self.header_offset
+    }
+
+    /// There is no cross-reference chain to append to: the index was rebuilt from object
+    /// headers because the file's own was unusable (see [`Self::repair_log`]), or the document
+    /// was built from scratch ([`Self::new_empty`]). A save writes such a document in full, even
+    /// when nothing was edited: for a repaired file that is what puts the repair on disk.
+    pub fn reconstructed(&self) -> bool {
+        self.revisions.is_empty()
     }
 
     /// Where each revision of the file ends (oldest first): the byte after the `%%EOF` (and its
@@ -851,9 +910,10 @@ impl Document {
         self.repair_log = Arc::new(log);
     }
 
-    /// `true` when there are unsaved edits.
+    /// `true` when there are unsaved edits. Removing an `/Encrypt` dictionary written inline in
+    /// the trailer (as MuPDF writes it) changes no object, and is an edit all the same.
     pub fn is_modified(&self) -> bool {
-        !self.overlay.is_empty()
+        !self.overlay.is_empty() || self.encryption_changed
     }
 
     /// Object numbers changed since the document was opened (or last saved).
@@ -1113,7 +1173,19 @@ impl Document {
         if let Some(s) = self.objstms.lock().map_err(|_| CosError::Poisoned)?.get(&num) {
             return Ok(s.clone());
         }
-        let Object::Stream(s) = &*self.try_get(num)? else { return Err(CosError::MissingObject(num)) };
+        // A file entry that cannot place the stream (one that says it is itself compressed
+        // inside another stream, as in #2367, or points nowhere) is tried by the stream's own
+        // header, as a plain object with a wrong offset is. An edited or freed stream, in the
+        // overlay or in a saved revision's table, is what that says it is: the file's copy
+        // must not come back.
+        let loaded = match self.try_get(num) {
+            Ok(o) if matches!(*o, Object::Stream(_)) => o,
+            _ if self.overlay.contains_key(&num) || matches!(self.xref_entry(num), Some(XrefEntry::Free { .. })) => {
+                return Err(CosError::MissingObject(num));
+            }
+            _ => Arc::new(self.scan_for(num).map(|(id, o)| self.decrypted(id, o)).ok_or(CosError::MissingObject(num))?),
+        };
+        let Object::Stream(s) = &*loaded else { return Err(CosError::MissingObject(num)) };
         let n = s.dict.int(b"N").unwrap_or(0).clamp(0, 1_000_000) as usize;
         let first = s.dict.int(b"First").unwrap_or(0).max(0) as usize;
         let data = s.decoded_within(self.stream_limit)?;
@@ -1345,13 +1417,13 @@ impl Document {
                 log.push(format!("cross-reference chain loops at offset {off}; stopped"));
                 break;
             }
-            let (primary, sect_trailer, is_stream) = match self.read_compact_section(off as usize) {
-                Ok(Some(v)) => v,
+            let ((primary, sect_trailer, is_stream), header_relative) = match self.read_compact_section(off as usize) {
+                Ok(Some(v)) => (v, false),
                 Ok(None) => return Ok(None),
                 Err(e) if self.header_offset > 0 => {
                     log.push(format!("xref at {off} unreadable ({e}); retrying relative to the header"));
                     match self.read_compact_section(off as usize + self.header_offset)? {
-                        Some(v) => v,
+                        Some(v) => (v, true),
                         None => return Ok(None),
                     }
                 }
@@ -1359,7 +1431,10 @@ impl Document {
                 // materialized reader logs it and the file is rebuilt from object headers (#1656).
                 Err(e) => return Err(e),
             };
-            revisions.push(Revision { xref_offset: off, is_stream });
+            revisions.push(Revision { xref_offset: off, is_stream, header_relative });
+            if primary.renumbered {
+                log.push(format!("xref subsection at {off} is numbered from 1 but begins with object 0's entry; read from 0"));
+            }
             let Some(rows) = retained_rows.checked_add(primary.row_count).filter(|rows| *rows <= MAX_COMPACT_XREF_ROWS) else { return Ok(None) };
             let Some(bytes) = retained_bytes.checked_add(primary.retained_bytes()).filter(|bytes| *bytes <= MAX_COMPACT_XREF_BYTES) else {
                 return Ok(None);
@@ -1434,6 +1509,7 @@ impl Document {
             let mut has_entries = false;
             let mut previous_end = None;
             let mut row_count = 0usize;
+            let mut renumbered = false;
             loop {
                 lx.skip_ws();
                 if lx.eat_keyword(b"trailer") {
@@ -1442,7 +1518,7 @@ impl Document {
                     if !layout_ok {
                         return Ok(None);
                     }
-                    return Ok(Some((XrefSection { data: XrefSectionData::Table, ranges, row_count, max_num, has_entries }, d, false)));
+                    return Ok(Some((XrefSection { data: XrefSectionData::Table, ranges, row_count, max_num, has_entries, renumbered }, d, false)));
                 }
                 let (Ok(Object::Int(start)), Ok(Object::Int(count))) = (lx.object(), lx.object()) else {
                     return Err(CosError::Syntax { offset: lx.pos, detail: "bad xref subsection header".into() });
@@ -1450,6 +1526,9 @@ impl Document {
                 if !valid_xref_range(start, count) || count > 10_000_000 {
                     return Err(CosError::Syntax { offset: lx.pos, detail: "invalid xref object range".into() });
                 }
+                let shifted = subsection_start(data, lx.pos, start, count);
+                renumbered |= shifted != start;
+                let start = shifted;
                 let Some(next_rows) = usize::try_from(count).ok().and_then(|count| row_count.checked_add(count)) else { return Ok(None) };
                 if next_rows > MAX_COMPACT_XREF_ROWS {
                     return Ok(None);
@@ -1602,7 +1681,14 @@ impl Document {
         }
         let max_num = ranges.iter().filter_map(|range| range.start.checked_add(range.count.saturating_sub(1))).max().unwrap_or(0);
         let row_count = row_start;
-        let section = XrefSection { data: XrefSectionData::Stream { bytes: Arc::new(raw), widths }, ranges, row_count, max_num, has_entries: false };
+        let section = XrefSection {
+            data: XrefSectionData::Stream { bytes: Arc::new(raw), widths },
+            ranges,
+            row_count,
+            max_num,
+            has_entries: false,
+            renumbered: false,
+        };
         let has_entries = section.has_any_entry();
         let section = XrefSection { has_entries, ..section };
         Ok(Some((section, stream.dict.clone(), true)))
@@ -1636,13 +1722,13 @@ impl Document {
             let mut sect = BTreeMap::new();
             // Object numbers whose entry in this section was set aside ([`Self::xref_oddities`]).
             let mut odd = Vec::new();
-            let (sect_trailer, is_stream) = match self.read_section(off as usize, &mut sect, &mut odd) {
-                Ok(v) => v,
+            let ((sect_trailer, is_stream), header_relative) = match self.read_section(off as usize, &mut sect, &mut odd, log) {
+                Ok(v) => (v, false),
                 Err(e) if self.header_offset > 0 => {
                     log.push(format!("xref at {off} unreadable ({e}); retrying relative to the header"));
                     sect.clear();
                     odd.clear();
-                    self.read_section(off as usize + self.header_offset, &mut sect, &mut odd)?
+                    (self.read_section(off as usize + self.header_offset, &mut sect, &mut odd, log)?, true)
                 }
                 Err(e) => {
                     // An unreadable older section loses every object only it locates (the page
@@ -1653,12 +1739,12 @@ impl Document {
                     return Err(e);
                 }
             };
-            revisions.push(Revision { xref_offset: off, is_stream });
+            revisions.push(Revision { xref_offset: off, is_stream, header_relative });
             // Hybrid files (§7.5.8.4): the /XRefStm entries supplement the table and replace the
             // free entries it gives objects only a cross-reference stream can locate.
             if let Some(x) = sect_trailer.int(b"XRefStm").filter(|x| *x >= 0) {
                 let mut stm = BTreeMap::new();
-                match self.read_section(x as usize, &mut stm, &mut odd) {
+                match self.read_section(x as usize, &mut stm, &mut odd, log) {
                     Ok(_) => {
                         for (num, e) in stm {
                             match sect.get(&num) {
@@ -1693,7 +1779,13 @@ impl Document {
 
     /// Read one section at `off`, adding entries not already known (newer sections win). `odd`
     /// collects the object numbers whose entry here is set aside ([`Self::xref_oddities`]).
-    fn read_section(&self, off: usize, entries: &mut BTreeMap<u32, XrefEntry>, odd: &mut Vec<u32>) -> Result<(Dict, bool), CosError> {
+    fn read_section(
+        &self,
+        off: usize,
+        entries: &mut BTreeMap<u32, XrefEntry>,
+        odd: &mut Vec<u32>,
+        log: &mut Vec<String>,
+    ) -> Result<(Dict, bool), CosError> {
         let data = &self.data;
         let mut lx = Lexer::new(data, off);
         if lx.eat_keyword(b"xref") {
@@ -1710,6 +1802,11 @@ impl Document {
                 if !valid_xref_range(start, count) || count > 10_000_000 {
                     return Err(CosError::Syntax { offset: lx.pos, detail: "invalid xref object range".into() });
                 }
+                let shifted = subsection_start(data, lx.pos, start, count);
+                if shifted != start {
+                    log.push(format!("xref subsection at {off} is numbered from 1 but begins with object 0's entry; read from 0"));
+                }
+                let start = shifted;
                 for i in 0..count {
                     lx.skip_ws();
                     let o = lx.token();
@@ -1920,6 +2017,34 @@ fn generated_id(seed: &[u8; 32]) -> Vec<u8> {
     out
 }
 
+/// The object number a classic xref subsection really starts at. A common producer bug heads the
+/// table `1 n` and then writes object 0's free entry (`0000000000 65535 f`) as its first row, so
+/// every row would be read one number too high and object 1 as free. Such a subsection is read
+/// from 0 when its second row, read that way, locates an object that is indeed numbered 1. `rows`
+/// is the position just after the subsection header.
+fn subsection_start(data: &[u8], rows: usize, start: i64, count: i64) -> i64 {
+    if start != 1 || count < 2 {
+        return start;
+    }
+    let mut lx = Lexer::new(data, rows);
+    let mut row = || {
+        lx.skip_ws();
+        let offset = std::str::from_utf8(lx.token()).ok().and_then(|s| s.parse::<u64>().ok());
+        lx.skip_ws();
+        let generation = std::str::from_utf8(lx.token()).ok().and_then(|s| s.parse::<u32>().ok());
+        lx.skip_ws();
+        (offset, generation, lx.token() == b"f")
+    };
+    let (Some(0), Some(65535), true) = row() else { return start };
+    let (Some(second), _, false) = row() else { return start };
+    let Some(at) = usize::try_from(second).ok().filter(|at| *at < data.len()) else { return start };
+    let mut obj = Lexer::new(data, at);
+    match (obj.object(), obj.object()) {
+        (Ok(Object::Int(1)), Ok(Object::Int(_))) if obj.eat_keyword(b"obj") => 0,
+        _ => start,
+    }
+}
+
 /// Object numbers must fit the representation used by references and the xref map.
 /// Validate the whole subsection before adding entries, so neither arithmetic overflow nor
 /// truncation can turn a damaged range into entries for unrelated objects.
@@ -1934,6 +2059,28 @@ const MAX_XREF_OBJECTS: usize = 8_388_607;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_state_matches_a_clone_and_no_changed_document() {
+        let mut doc = Document::new_empty();
+        let a = doc.add(Object::Int(1));
+        let state = doc.read_state();
+        let snapshot = doc.clone();
+        assert!(state.matches(&doc) && state.matches(&snapshot));
+        // The same value set again is still a change: another allocation.
+        doc.set(a, Object::Int(1));
+        assert!(!state.matches(&doc) && state.matches(&snapshot));
+        let edited = doc.read_state();
+        doc.free(a);
+        assert!(!edited.matches(&doc));
+        let mut trailer_changed = snapshot.clone();
+        trailer_changed.trailer_mut().set(b"Info".to_vec(), Object::Null);
+        assert!(!state.matches(&trailer_changed));
+        // Another document's state never matches, even with the same changes.
+        let mut other = Document::new_empty();
+        other.add(Object::Int(1));
+        assert!(!other.read_state().matches(&snapshot));
+    }
 
     /// Build a classic-xref file from object bodies (object i+1 = bodies[i]).
     pub(crate) fn build(bodies: &[&str], trailer: &str) -> Vec<u8> {
@@ -2083,6 +2230,71 @@ mod tests {
         assert_eq!(doc.get(ObjRef { num: 3, generation: 0 }).as_string().map(|s| s.bytes.clone()), Some(b"three".to_vec()));
         assert!(!doc.xref_entry_is_exact(3));
         assert!(doc.xref_entry_is_exact(1) && doc.xref_entry_is_exact(2));
+    }
+
+    /// A classic table with `/Size` rows and object 0's free entry first, its subsection numbered
+    /// `1 n` instead of `0 n` (#2676): every row is one number off.
+    fn misnumbered_table(start: u32) -> Vec<u8> {
+        let bodies = ["<< /Marker (first object) >>", "<< /Type /Pages /Kids [] /Count 0 >>", "<< /Type /Catalog /Pages 2 0 R >>"];
+        let mut out = b"%PDF-1.7
+"
+        .to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(
+                format!(
+                    "{} 0 obj
+{body}
+endobj
+",
+                    i + 1
+                )
+                .as_bytes(),
+            );
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n{start} 4\n0000000000 65535 f \n").as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size 4 /Root 3 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        out
+    }
+
+    #[test]
+    fn a_table_numbered_from_1_that_begins_with_object_0_is_read_from_0() {
+        let doc = Document::open(Arc::new(misnumbered_table(1))).unwrap();
+        let first = doc.get(ObjRef::new(1, 0)).as_dict().cloned().expect("object 1 is not free");
+        assert!(first.contains(b"Marker"));
+        assert_eq!(doc.root(), Some(ObjRef::new(3, 0)));
+        assert!(doc.repair_log().iter().any(|l| l.contains("numbered from 1")), "{:?}", doc.repair_log());
+        // A correct table reads the same and logs nothing.
+        let fine = Document::open(Arc::new(misnumbered_table(0))).unwrap();
+        assert!(fine.get(ObjRef::new(1, 0)).as_dict().is_some_and(|d| d.contains(b"Marker")));
+        assert!(!fine.repair_log().iter().any(|l| l.contains("numbered from 1")));
+    }
+
+    #[test]
+    fn a_table_that_really_starts_at_1_keeps_its_numbers() {
+        // Object 1 deleted for good (generation 65535) in a subsection that does start at 1: its
+        // second row locates object 2, so nothing is shifted.
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let pages = bytes.len();
+        bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let catalog = bytes.len();
+        bytes.extend_from_slice(b"3 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!(
+                "xref\n0 1\n0000000000 65535 f \n1 3\n0000000000 65535 f \n{pages:010} 00000 n \n{catalog:010} 00000 n \ntrailer\n<< /Size 4 /Root 3 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let doc = Document::open(Arc::new(bytes)).unwrap();
+        assert!(doc.get(ObjRef::new(2, 0)).as_dict().is_some_and(|d| d.name(b"Type") == Some(b"Pages")));
+        assert!(doc.get(ObjRef::new(1, 0)).as_dict().is_none(), "object 1 stays free");
+        assert!(!doc.repair_log().iter().any(|l| l.contains("numbered from 1")));
     }
 
     #[test]
@@ -2533,6 +2745,93 @@ mod tests {
         // The first revision opens on its own, without the update.
         let old = Document::open(Arc::new(bytes[..ends[0]].to_vec())).unwrap();
         assert!(old.get(ObjRef::new(1, 0)).as_dict().unwrap().get(b"Lang").is_none());
+    }
+
+    /// qpdf's `xref-compressed-in-compressed.pdf` in miniature: object 3 is an object stream
+    /// holding object 4, and the cross-reference stream says object 3 itself lives in stream 99.
+    fn compressed_in_compressed_fixture() -> Document {
+        let mut out = b"%PDF-1.5\n".to_vec();
+        let at = |out: &mut Vec<u8>, num: u32, body: &str| {
+            let off = out.len();
+            out.extend_from_slice(format!("{num} 0 obj\n{body}\nendobj\n").as_bytes());
+            off as u16
+        };
+        let o1 = at(&mut out, 1, "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>");
+        let o2 = at(&mut out, 2, "<< /Type /Pages /Kids [] /Count 0 >>");
+        let inner = "<< /Type /Outlines /Count 0 >>";
+        at(&mut out, 3, &format!("<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n4 0 {inner}\nendstream", 4 + inner.len()));
+        // /W [1 2 1]: object 3 is said to live in stream 99 (which does not exist), 4 in stream 3.
+        let rows: Vec<[u8; 4]> = vec![
+            [0, 0, 0, 255],
+            [1, 0, o1 as u8, 0],
+            [1, 0, o2 as u8, 0],
+            [2, 0, 99, 0],
+            [2, 0, 3, 0],
+            [1, (out.len() >> 8) as u8, out.len() as u8, 0],
+        ];
+        let rows: Vec<u8> = rows.concat();
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("5 0 obj\n<< /Type /XRef /W [1 2 1] /Index [0 6] /Size 6 /Root 1 0 R /Length {} >>\nstream\n", rows.len()).as_bytes(),
+        );
+        out.extend_from_slice(&rows);
+        out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        Document::open(Arc::new(out)).unwrap()
+    }
+
+    /// An object stream whose own cross-reference entry says it is compressed inside another
+    /// stream (which the format forbids, and which does not exist here: qpdf's
+    /// `xref-compressed-in-compressed.pdf`, #2367) could not be loaded, so every object in it
+    /// read as null and a full save wrote `/Outlines null`. The stream is now found by its own
+    /// header, as a plain object with a wrong offset is.
+    #[test]
+    fn an_object_stream_marked_as_compressed_is_found_by_its_header() {
+        let doc = compressed_in_compressed_fixture();
+        assert_eq!(doc.revisions().len(), 1, "the chain itself reads: {:?}", doc.repair_log());
+        let outlines = doc.get(ObjRef::new(4, 0));
+        assert_eq!(outlines.as_dict().and_then(|d| d.name(b"Type")), Some(&b"Outlines"[..]), "{outlines:?}");
+        let saved = crate::write_full(&doc, &crate::SaveOptions::default()).unwrap();
+        let back = Document::open(Arc::new(saved)).unwrap();
+        let catalog = back.get(back.root().unwrap());
+        let outlines = back.resolve(catalog.as_dict().unwrap().get(b"Outlines").unwrap());
+        assert_eq!(outlines.as_dict().and_then(|d| d.name(b"Type")), Some(&b"Outlines"[..]), "the full save keeps it: {outlines:?}");
+    }
+
+    /// The header fallback is for file entries only: once the stream is freed (or replaced) in
+    /// the overlay, its objects must not come back from the file's copy of it.
+    #[test]
+    fn a_freed_object_stream_is_not_found_by_its_header() {
+        let doc = compressed_in_compressed_fixture();
+        assert!(doc.get(ObjRef::new(4, 0)).as_dict().is_some());
+        let mut edited = doc.clone();
+        edited.free(ObjRef::new(3, 0));
+        let fresh = edited.object_reader().document;
+        assert!(matches!(*fresh.get(ObjRef::new(4, 0)), Object::Null), "{:?}", fresh.get(ObjRef::new(4, 0)));
+        let mut replaced = doc.clone();
+        replaced.set(ObjRef::new(3, 0), Object::Int(0));
+        let fresh = replaced.object_reader().document;
+        assert!(matches!(*fresh.get(ObjRef::new(4, 0)), Object::Null), "{:?}", fresh.get(ObjRef::new(4, 0)));
+    }
+
+    /// The same once the free is saved: the revision's table says the stream is free, and
+    /// neither reading the file back nor rewriting it in full brings its objects back.
+    #[test]
+    fn a_container_freed_in_a_saved_revision_is_not_found_by_its_header() {
+        let mut edited = compressed_in_compressed_fixture();
+        edited.free(ObjRef::new(3, 0));
+        let incremental = crate::write_incremental(&edited, &crate::SaveOptions::default()).unwrap();
+        let reopened = Document::open(Arc::new(incremental)).unwrap();
+        assert_eq!(reopened.revisions().len(), 2);
+        assert!(matches!(reopened.xref_entry(3), Some(XrefEntry::Free { .. })));
+        assert!(matches!(*reopened.get(ObjRef::new(4, 0)), Object::Null), "{:?}", reopened.get(ObjRef::new(4, 0)));
+        for object_streams in [true, false] {
+            let opts = crate::SaveOptions { object_streams, ..Default::default() };
+            let full = crate::write_full(&reopened, &opts).unwrap();
+            let back = Document::open(Arc::new(full)).unwrap();
+            let catalog = back.get(back.root().unwrap());
+            let outlines = catalog.as_dict().unwrap().get(b"Outlines").map(|o| back.resolve(o));
+            assert!(outlines.as_ref().is_none_or(|o| matches!(**o, Object::Null)), "the full save keeps it out: {outlines:?}");
+        }
     }
 
     #[test]

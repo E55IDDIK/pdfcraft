@@ -411,6 +411,7 @@ fn app_creator<'a>(
         if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string(LEGACY_STORAGE_KEY))) {
             app.restore(&json);
         }
+        app.window_state = pdfcraft_ui_egui::window_state::WindowState::started_with(cc.storage);
         app.integrated_titlebar = integrated;
         app.window_controls = window_controls;
         app.system_text_scale = text_scale::system();
@@ -608,7 +609,7 @@ fn configure_gpu(native: &mut eframe::NativeOptions) {
     setup.instance_descriptor.flags = setup.instance_descriptor.flags.difference(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL).with_env();
     // egui-wgpu requests only 8192 pixels even when the adapter can render larger surfaces.
     // A restored 3440-point window at 250% DPI requests 8600 pixels and otherwise panics in
-    // Surface::configure before the app starts. Keep the renderer's other device requirements,
+    // Surface::configure before the app starts. Keep the renderer's other compatible requirements,
     // but enable the adapter's actual 2D texture extent (also for smaller/downlevel adapters).
     let device_descriptor = std::sync::Arc::clone(&setup.device_descriptor);
     setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -649,8 +650,9 @@ fn configure_gpu(native: &mut eframe::NativeOptions) {
 }
 
 /// Surface textures must fit the device's enabled limits, not just the physical GPU's limits.
-/// Changing only the 2D extent preserves egui-wgpu's backend-specific downlevel requirements.
+/// Clamp egui-wgpu's backend-specific requirements before enabling the adapter's full 2D extent.
 fn surface_texture_limits(mut required: eframe::wgpu::Limits, supported: &eframe::wgpu::Limits) -> eframe::wgpu::Limits {
+    required = required.or_worse_values_from(supported);
     required.max_texture_dimension_2d = supported.max_texture_dimension_2d;
     required
 }
@@ -955,14 +957,49 @@ mod tests {
     fn surface_limits_preserve_other_requirements_and_never_overrequest() {
         for required in [eframe::wgpu::Limits::default(), eframe::wgpu::Limits::downlevel_webgl2_defaults()] {
             for extent in [4096, 8192, 16384] {
-                let supported = eframe::wgpu::Limits { max_texture_dimension_2d: extent, ..required.clone() };
+                let supported = eframe::wgpu::Limits {
+                    max_texture_dimension_2d: extent,
+                    max_bind_groups: 8,
+                    min_uniform_buffer_offset_alignment: 128,
+                    min_storage_buffer_offset_alignment: 128,
+                    ..required.clone()
+                };
                 let enabled = super::surface_texture_limits(required.clone(), &supported);
                 let mut expected = required.clone();
                 expected.max_texture_dimension_2d = extent;
                 assert_eq!(enabled, expected);
                 assert_eq!(enabled.max_texture_dimension_2d, supported.max_texture_dimension_2d);
+                assert!(enabled.check_limits(&supported));
             }
         }
+    }
+
+    #[test]
+    fn surface_limits_fit_v3d_shader_variable_limit() {
+        // Issue #2383: V3D supports 15 variables, below the default request of 16.
+        let required = eframe::wgpu::Limits::default();
+        let supported = eframe::wgpu::Limits { max_texture_dimension_2d: 7680, max_inter_stage_shader_variables: 15, ..required.clone() };
+        let enabled = super::surface_texture_limits(required.clone(), &supported);
+        assert!(enabled.check_limits(&supported), "unsupported device limits: {enabled:?}");
+        let expected = eframe::wgpu::Limits { max_texture_dimension_2d: 7680, max_inter_stage_shader_variables: 15, ..required };
+        assert_eq!(enabled, expected);
+    }
+
+    #[test]
+    fn surface_limits_fit_downlevel_maxima_and_minimum_alignments() {
+        let required = eframe::wgpu::Limits::downlevel_webgl2_defaults();
+        let supported = eframe::wgpu::Limits {
+            max_texture_dimension_2d: 2048,
+            max_bind_groups: 2,
+            max_vertex_attributes: 8,
+            min_uniform_buffer_offset_alignment: 512,
+            min_storage_buffer_offset_alignment: 512,
+            ..required.clone()
+        };
+        let enabled = super::surface_texture_limits(required, &supported);
+        assert!(enabled.check_limits(&supported), "unsupported device limits: {enabled:?}");
+        // Larger minimum alignments are weaker capabilities, unlike maximum limits.
+        assert_eq!(enabled, supported);
     }
 
     #[test]

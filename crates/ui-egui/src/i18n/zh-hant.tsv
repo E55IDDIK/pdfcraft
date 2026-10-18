@@ -109,7 +109,7 @@
 	Sanitize	清理
 	Mark all	全部標記
 	Save changes to “{name}” before closing?	在關閉前儲存對「{name}」的更改？
-	Your changes will be lost if you don't save them.	如果不儲存，更改將會丟失。
+	Your changes will be lost if you don't save them.	如果不儲存，更改將會遺失。
 	Password required	需要密碼
 	“{name}” is protected. Enter a password to open it.	「{name}」受保護。請輸入密碼以開啟。
 	Password	密碼
@@ -190,7 +190,7 @@
 	Discard User Data	捨棄使用者資料
 	Clean Up	清理
 	Color Images	彩色圖片
-	Grayscale Images	灰度圖片
+	Grayscale Images	灰階圖片
 	Bicubic downsampling to	雙三次降取樣至
 	for images above	（高於此解析度的圖片）
 	Compression	壓縮
@@ -303,8 +303,8 @@
 	Negative number style:	負數樣式：
 	Format:	格式：
 	Custom:	自訂：
-	Zip Code	郵政編碼
-	Zip Code + 4	郵政編碼 + 4
+	Zip Code	郵遞區號
+	Zip Code + 4	郵遞區號 + 4
 	Phone Number	電話號碼
 	Social Security Number	社會安全號碼
 	Arbitrary Mask	任意掩碼
@@ -503,7 +503,7 @@
 	Continue	繼續
 	Configure a Digital ID for Signing	設定簽署用的數位 ID
 	Use a Digital ID from a file	使用檔案中的數位 ID
-	Create a new Digital ID (self-signed, saved to a password-protected file)	建立新數位 ID（自簽名，儲存到受密碼保護的檔案）
+	Create a new Digital ID (self-signed, saved to a password-protected file)	建立新數位 ID（自我簽署，儲存到受密碼保護的檔案）
 	Name	名稱
 	Organizational Unit	組織單位
 	Organization Name	組織名稱
@@ -511,7 +511,7 @@
 	Country/Region	國家/地區
 	Key Algorithm	金鑰演算法
 	Confirm Password	確認密碼
-	Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others.	有效期 5 年，用於數位簽章。自簽名 ID 通常不受他人信任。
+	Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others.	有效期 5 年，用於數位簽章。自我簽署 ID 通常不受他人信任。
 	File (.p12, .pfx)	檔案 (.p12, .pfx)
 	Digital ID	數位 ID
 	Browse…	瀏覽…
@@ -566,7 +566,7 @@
 	Public key	公鑰
 	Key usage	金鑰用途
 	Not present	不存在
-	Self-signed	自簽名
+	Self-signed	自我簽署
 	Edit Action	編輯操作
 	New Action	新建操作
 	Action name:	操作名稱：
@@ -772,9 +772,9 @@
 	Social Security Numbers	社會安全號碼
 	Dates	日期
 	Text in images isn't found; recognise text (OCR) first.	圖片中的文字無法找到；請先識別文字（OCR）。
-	No matches.	無匹配。
+	No matches.	無相符。
 	Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth.	此處未顯示部分書籤：面板列出的書籤數量和巢狀深度有限。
-	{n} match(es) marked for redaction.	已標記 {n} 個匹配以待遮蔽內容。
+	{n} match(es) marked for redaction.	已標記 {n} 個相符以待遮蔽內容。
 	Multiple words or phrases	多個單字或片語
 	One word or phrase per line	每行一個單字或片語
 	Import list…	匯入清單…
@@ -815,7 +815,7 @@
 	{name} (default)	{name}（預設）
 	Copies:	份數：
 	Collate	逐份列印
-	Print in grayscale	灰度列印
+	Print in grayscale	灰階列印
 	Two-sided:	雙面：
 	Off	關
 	Flip on long edge	沿長邊翻轉
@@ -1074,6 +1074,7 @@
 	Next page	下一頁
 	Previous page	上一頁
 	Current page — type a page number or label (such as iv) and press Enter	目前頁面：輸入頁碼或頁面標籤（例如 iv），再按 Enter
+	Zoom — type a percentage and press Enter	縮放 — 輸入百分比並按 Enter
 	Open a PDF ({key})	開啟 PDF（{key}）
 	Dark gray theme	深灰色主題
 	Light theme	淺色主題
@@ -1174,7 +1175,7 @@
 	Add a comment	新增註解
 	No comments yet.	尚無註解。
 	Pick a tool in the quick bar, or type above.	在快捷欄中選擇工具，或在上方輸入。
-	No comments match.	沒有匹配的註解。
+	No comments match.	沒有相符的註解。
 	Unknown author	未知作者
 	No colour	無顏色
 	Remove checkmark	刪除勾選標記
@@ -1231,13 +1232,13 @@
 	Open in a new tab	在新索引標籤中開啟
 	This document has no pages.	本文件沒有頁面。
 	Find text	尋找文字
-	No matches	無匹配
+	No matches	無相符
 	Searching… {s}/{p}	正在搜尋… {s}/{p}
 	{c} of {n}{more}	{c} / {n}{more}
 	Previous ({key})	上一個 ({key})
 	Next ({key})	下一個 ({key})
 	Find options	尋找選項
-	Whole words only	僅全字匹配
+	Whole words only	僅全字相符
 	Case-sensitive	區分大小寫
 	Close (Esc)	關閉 (Esc)
 	Align	對齊
@@ -1302,7 +1303,7 @@
 	 · password-protected	 · 受密碼保護
 	Recover	恢復
 	Discard	放棄
-	Next / previous match	下一個／上一個符合項目
+	Next / previous match	下一個／上一個相符項目
 	Copy selected text	複製所選文字
 	Select a word	選取一個詞
 	Clear selection / close find	清除選取／關閉尋找
@@ -1618,7 +1619,7 @@
 	the name is not a plain file name	名稱不是單純的檔案名稱
 	Wrote 1 file to {dir}	已將 1 個檔案寫入{dir}
 	Wrote {n} files to {dir}	已將{n}個檔案寫入{dir}
-	No pages match those choices	所選條件沒有匹配的頁面
+	No pages match those choices	所選條件沒有相符的頁面
 	Couldn't split: {e}	無法拆分：{e}
 	Couldn't summarize comments: {e}	無法彙總註解：{e}
 	Couldn't open the result: {e}	無法開啟結果：{e}
@@ -1693,8 +1694,8 @@
 	What word or phrase would you like to search for?	您想搜尋哪個詞或短語？
 	Searching… {s} of {p} pages	正在搜尋… {s}/{p} 頁
 	 (searching… {s} of {p} pages)	（正在搜尋… {s}/{p} 頁）
-	1 instance	1 個匹配
-	{n} instances	{n} 個匹配
+	1 instance	1 個相符
+	{n} instances	{n} 個相符
 	Go to this result	轉到此結果
 	Highlight	突出顯示
 	Draw	繪製
@@ -1743,7 +1744,7 @@
 	Tool	工具
 	Command	指令
 	Search tools and commands…	搜尋工具與指令…
-	No matching tools	找不到符合的工具
+	No matching tools	找不到相符的工具
 	All tools	所有工具
 	Read	閱讀
 	Convert	轉換

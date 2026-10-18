@@ -2282,6 +2282,11 @@ fn line_endings_of(d: &Dict) -> Option<Vec<LineEnding>> {
 /// Replace Text (Acrobat's proposal): strike out `quads` and add a caret at the end of the
 /// struck text holding `replacement`, grouped with the strikeout (`/IRT` + `/RT /Group`) so they
 /// move, list and delete as one. Returns the strikeout's index.
+///
+/// The two annotations need their own `/NM`: XFDF names a reply by the `/NM` of what it replies
+/// to, so one id for both writes `inreplyto` equal to the caret's own `name`, and a reader that
+/// resolves names (Acrobat, and our own importer) loses the pair. `caret_meta` is a second id
+/// from the caller, so the edit stays deterministic.
 #[allow(clippy::too_many_arguments)]
 pub fn add_text_replacement(
     doc: &mut Document,
@@ -2292,6 +2297,7 @@ pub fn add_text_replacement(
     strike: &Style,
     caret: &Style,
     meta: &Meta,
+    caret_meta: &Meta,
 ) -> Result<usize, AnnotError> {
     let last = *quads.last().ok_or_else(|| AnnotError::Invalid("select the text to replace first".into()))?;
     let s = add_annotation(
@@ -2317,7 +2323,7 @@ pub fn add_text_replacement(
     let c = add_annotation(
         doc,
         &NewAnnotation { page, shape: Shape::Caret { rect }, style: caret.clone(), contents: replacement.into(), author: author.into() },
-        meta,
+        caret_meta,
     )?;
     let (_, cr) = annot_ref(doc, page, c)?;
     doc.update_dict(cr, |d| {

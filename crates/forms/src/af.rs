@@ -587,7 +587,9 @@ pub fn parse_date(text: &str, fmt: &str) -> Option<DateTime> {
         return None;
     }
     let lower = t.to_lowercase();
-    let pm = lower.contains("pm") || lower.ends_with('p');
+    // A bare trailing "p" ("5:30p") only counts when it follows a digit, not a word like "Sep".
+    let bare_p = lower.strip_suffix('p').is_some_and(|rest| rest.trim_end().ends_with(|c: char| c.is_ascii_digit()));
+    let pm = lower.contains("pm") || bare_p;
     let am = lower.contains("am");
     // Tokens: numbers and month names.
     let mut nums: Vec<u32> = Vec::new();
@@ -1283,5 +1285,27 @@ mod never_crash_tests {
         }
         let dt = DateTime { y: i32::MAX, m: 1, d: u32::MAX, hh: 0, mm: 0, ss: 0 };
         let _ = format_date(dt, "dddd ddd");
+    }
+}
+
+#[cfg(test)]
+mod pm_marker_tests {
+    use super::*;
+
+    /// A month name ending in "p" ("Sep") is not a PM marker; only a "p" attached to a time is.
+    #[test]
+    fn month_name_ending_in_p_is_not_pm() {
+        let dt = parse_date("2026 05 Sep", "yyyy dd mmm HH:MM").expect("valid date");
+        assert_eq!((dt.m, dt.d, dt.hh, dt.mm), (9, 5, 0, 0));
+        let f = Format::Date("yyyy dd mmm HH:MM".into());
+        assert_eq!(format_value(&f, "2026 05 Sep"), "2026 05 Sep 00:00");
+        assert!(keystroke(&f, "date", "2026 05 Sep").is_ok());
+    }
+
+    #[test]
+    fn bare_p_after_a_time_is_still_pm() {
+        assert_eq!(parse_date("05/09/2026 5:30p", "mm/dd/yyyy h:MM").map(|d| d.hh), Some(17));
+        assert_eq!(parse_date("05/09/2026 5:30 p", "mm/dd/yyyy h:MM").map(|d| d.hh), Some(17));
+        assert_eq!(parse_date("05/09/2026 5:30 pm", "mm/dd/yyyy h:MM").map(|d| d.hh), Some(17));
     }
 }

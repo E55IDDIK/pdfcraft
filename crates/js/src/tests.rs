@@ -637,6 +637,19 @@ mod formcalc {
     }
 
     #[test]
+    fn str_and_format_round_exact_ties_away_from_zero() {
+        assert_eq!(calc("Str(2.5, 3, 0)"), "  3");
+        assert_eq!(calc("Str(0.5, 3, 0)"), "  1");
+        assert_eq!(calc("Str(-2.5, 4, 0)"), "  -3");
+        assert_eq!(calc("Str(1.125, 6, 2)"), "  1.13");
+        assert_eq!(calc(r#"Format("9", 2.5)"#), "3");
+        assert_eq!(calc(r#"Format("9.99", 0.125)"#), "0.13");
+        assert_eq!(calc(r#"Format("9.9", 0.25)"#), "0.3");
+        assert_eq!(calc(r#"Format("9.9", -0.25)"#), "-0.3");
+        assert_eq!(calc(r#"Format("9.99", 2.344)"#), "2.34");
+    }
+
+    #[test]
     fn built_in_functions_cover_the_common_set() {
         assert_eq!(calc("Abs(-2.5)"), "2.5");
         assert_eq!(calc("Ceil(2.1)"), "3");

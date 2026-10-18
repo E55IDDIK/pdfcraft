@@ -712,6 +712,13 @@ fn num_text(n: f64) -> String {
     if s.is_empty() || s == "-0" { "0".into() } else { s.to_string() }
 }
 
+/// `v` with `decimals` places, rounding exact halves away from zero (Rust's formatter rounds them to even).
+fn fixed(v: f64, decimals: usize) -> String {
+    let k = 10f64.powi(decimals.min(20) as i32);
+    let scaled = (v * k).round() / k;
+    format!("{:.decimals$}", if scaled.is_finite() { scaled } else { v })
+}
+
 /// The number a string holds: its leading numeric part (`12abc` → 12), `None` for none.
 fn parse_num(s: &str) -> Option<f64> {
     let t = s.trim();
@@ -2166,7 +2173,7 @@ impl Interp<'_> {
                 let v = self.arg_num(args, 0)?;
                 let width = if args.len() > 1 { self.arg_num(args, 1)?.clamp(0.0, 1000.0) as usize } else { 10 };
                 let prec = if args.len() > 2 { self.arg_num(args, 2)?.clamp(0.0, 20.0) as usize } else { 0 };
-                let text = format!("{v:.prec$}");
+                let text = fixed(v, prec);
                 Val::Str(if text.len() > width { "*".repeat(width) } else { format!("{text:>width$}") })
             }
             "substr" => {
@@ -2255,7 +2262,7 @@ impl Interp<'_> {
                 let num = self.to_num(&v);
                 let decimals = pic.split_once('.').map_or(0, |(_, f)| f.chars().filter(|c| matches!(c, '9' | 'z' | 'Z')).count()).min(20);
                 let grouped = pic.contains(',');
-                let mut text = format!("{:.decimals$}", num.abs());
+                let mut text = fixed(num.abs(), decimals);
                 if grouped {
                     let (int, frac) = text.split_once('.').map_or((text.as_str(), ""), |(a, b)| (a, b));
                     let mut g = String::new();

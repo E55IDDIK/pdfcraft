@@ -17,6 +17,53 @@ fn page_rotation_resolves_inheritance_overrides_and_missing_pages() {
 }
 
 #[test]
+fn indirect_page_rotation_is_read_and_updated_from_its_effective_value() {
+    let large = i64::MAX - i64::MAX % 90;
+    for (current, degrees, expected) in [(270, 90, 0), (-90, 90, 0), (large, 90, 90), (90, -180, 270)] {
+        for level in 0..3 {
+            let mut doc = open(fixture());
+            let rotation = doc.add(Object::Int(current));
+            let page = pages(&doc).unwrap()[0].obj;
+            let target = match level {
+                0 => page,
+                1 => doc.get(page).as_dict().unwrap().reference(b"Parent").unwrap(),
+                _ => pages_root(&doc).unwrap(),
+            };
+            doc.update_dict(target, |d| d.set(b"Rotate".to_vec(), Object::Ref(rotation))).unwrap();
+            let bytes = write_full(&doc, &SaveOptions::default()).unwrap();
+            let mut doc = open(bytes);
+            let rotation = walk(&doc).unwrap()[0].1.reference(b"Rotate").unwrap();
+            let initial = page_rotation(&doc, 0).unwrap();
+            rotate_pages(&mut doc, &[0], degrees).unwrap();
+            assert_eq!(*doc.get(rotation), Object::Int(current), "shared rotation object unchanged");
+            for saved in [write_incremental(&doc, &SaveOptions::default()).unwrap(), write_full(&doc, &SaveOptions::default()).unwrap()] {
+                let reopened = open(saved.clone());
+                let pdf = hayro_syntax::Pdf::new(saved).unwrap();
+                let dimensions = if expected % 180 == 0 { (300.0, 400.0) } else { (400.0, 300.0) };
+                assert_eq!(pdf.pages()[0].render_dimensions(), dimensions, "written PDF has the correct orientation");
+                assert_eq!(page_rotation(&reopened, 0).unwrap(), expected);
+                assert_eq!(page_rotation(&reopened, 1).unwrap(), if level == 0 { 90 } else { current.rem_euclid(360) }, "sibling unchanged");
+                assert_eq!(page_rotation(&reopened, 2).unwrap(), if level == 2 { current.rem_euclid(360) } else { 90 }, "other subtree unchanged");
+            }
+            assert_eq!(initial, current.rem_euclid(360), "effective indirect rotation at level {level}");
+        }
+    }
+}
+
+#[test]
+fn malformed_indirect_rotations_keep_the_zero_fallback() {
+    for value in [Object::Null, Object::name("invalid"), Object::Ref(ObjRef::new(99_999, 0))] {
+        let mut doc = open(fixture());
+        let rotation = doc.add(value);
+        let page = pages(&doc).unwrap()[0].obj;
+        doc.update_dict(page, |d| d.set(b"Rotate".to_vec(), Object::Ref(rotation))).unwrap();
+        assert_eq!(page_rotation(&doc, 0).unwrap(), 0);
+        rotate_pages(&mut doc, &[0], 90).unwrap();
+        assert_eq!(page_rotation(&doc, 0).unwrap(), 90);
+    }
+}
+
+#[test]
 fn rotate_rejects_angles_that_are_not_multiples_of_90() {
     // The page tree only turns in quarter steps, so anything else used to be silently truncated
     // by the integer division. It has to be an error, and the document must stay as it was.
@@ -245,6 +292,25 @@ fn move_pages_reorders() {
 }
 
 #[test]
+fn reverse_pages_reorders() {
+    let mut doc = open(fixture());
+    reverse_pages(&mut doc, &[0, 1, 2]).unwrap();
+    assert_eq!(labels(&doc), ["Page 3", "Page 2", "Page 1"]);
+    // Unsorted, repeated indices name the same slots; page 1's slot stays put.
+    reverse_pages(&mut doc, &[2, 1, 2]).unwrap();
+    let doc = save_and_reopen(&doc);
+    assert_eq!(labels(&doc), ["Page 3", "Page 1", "Page 2"]);
+}
+
+#[test]
+fn cannot_reverse_missing_or_fewer_than_two_pages() {
+    let mut doc = open(fixture());
+    assert_eq!(reverse_pages(&mut doc, &[0, 3]), Err(OrganizeError::NoSuchPage(3)));
+    assert!(matches!(reverse_pages(&mut doc, &[1, 1]), Err(OrganizeError::Invalid(_))));
+    assert!(!doc.is_modified(), "failed operations leave the document untouched");
+}
+
+#[test]
 fn inserts_blank_page() {
     let mut doc = open(fixture());
     insert_blank_page(&mut doc, 1, 612.0, 792.0).unwrap();
@@ -315,6 +381,59 @@ fn page_transitions_are_set_removed_and_checked() {
     let doc = save_and_reopen(&doc);
     // (A whole number of seconds may come back as an integer: the writer's choice.)
     assert_eq!(page_dict(&doc, 2).get(b"Dur").and_then(Object::as_f64), Some(5.0));
+}
+
+/// Custom document properties (Document Properties ▸ Custom): any `/Info` key the spec does not
+/// name, set and cleared like the standard ones, listed apart from them, and with the names
+/// Acrobat refuses refused here too.
+#[test]
+fn custom_document_properties_are_listed_set_removed_and_their_names_checked() {
+    let mut doc = open(fixture());
+    assert!(custom_info(&doc).is_empty());
+    set_info(&mut doc, "Title", "Report").unwrap();
+    set_info(&mut doc, "Project", "Apollo").unwrap();
+    set_info(&mut doc, "Revision", "7").unwrap();
+    let mut listed = custom_info(&doc);
+    listed.sort();
+    assert_eq!(listed, [("Project".to_string(), "Apollo".to_string()), ("Revision".to_string(), "7".to_string())], "standard keys are not custom");
+    assert_eq!(info(&doc, "Project").as_deref(), Some("Apollo"));
+    set_info(&mut doc, "Project", "").unwrap();
+    let doc = save_and_reopen(&doc);
+    assert_eq!(custom_info(&doc), [("Revision".to_string(), "7".to_string())], "cleared, and the rest survives a save");
+    assert_eq!(info(&doc, "Title").as_deref(), Some("Report"));
+
+    for bad in ["", "Title", "ModDate", "Bad Name", "a/b", "tab\tbed", "hash#tag", "(x)"] {
+        assert!(check_custom_key(bad).is_err(), "{bad:?} must be refused");
+    }
+    let long = "x".repeat(MAX_CUSTOM_KEY_LEN + 1);
+    assert!(check_custom_key(&long).is_err());
+    for good in ["Project", "Révision", "部門", "key-2.0", &"y".repeat(MAX_CUSTOM_KEY_LEN)] {
+        assert!(check_custom_key(good).is_ok(), "{good:?} is a usable name");
+    }
+    let mut doc = open(fixture());
+    assert!(set_info(&mut doc, "Bad Name", "x").is_err(), "set_info checks custom names");
+    assert!(custom_info(&doc).is_empty());
+}
+
+/// Padding is not part of a custom value, in any mix of NULs and whitespace, a value that is only
+/// padding is not listed, and such entries don't count towards the 256 listed: a real property
+/// after 300 blank ones is still there.
+#[test]
+fn custom_document_properties_drop_padding_before_the_cap() {
+    let mut doc = open(fixture());
+    set_info(&mut doc, "Title", "Report").unwrap();
+    let Some(Object::Ref(info_ref)) = doc.trailer().get(b"Info").cloned() else { panic!("an /Info reference") };
+    let text = |s: &str| Object::String(pdfcraft_cos::PdfString { bytes: s.as_bytes().to_vec(), hex: false });
+    doc.update_dict(info_ref, |d| {
+        d.set(b"Mixed".to_vec(), text(" \0Lab\0 "));
+        d.set(b"Pad".to_vec(), text(" \0 \0"));
+        for i in 0..300 {
+            d.set(format!("Blank{i}").into_bytes(), text("  "));
+        }
+        d.set(b"Keep".to_vec(), text("yes"));
+    })
+    .unwrap();
+    assert_eq!(custom_info(&doc), [("Mixed".to_string(), "Lab".to_string()), ("Keep".to_string(), "yes".to_string())]);
 }
 
 /// A one-page document whose catalog has `xmp` as its (Flate-compressed) XMP packet, and the
@@ -1852,9 +1971,22 @@ fn page_boxes_default_inherit_and_set() {
 #[test]
 fn duplicate_pages_inserts_copies_after_the_last() {
     let mut doc = open(fixture());
-    duplicate_pages(&mut doc, &[0, 1]).unwrap();
+    duplicate_pages(&mut doc, &[0, 1], None).unwrap();
     let doc = open(write_full(&doc, &SaveOptions::default()).unwrap());
     assert_eq!(labels(&doc), ["Page 1", "Page 2", "Page 1", "Page 2", "Page 3"]);
+}
+
+#[test]
+fn duplicate_pages_at_inserts_the_copies_there() {
+    let mut doc = open(fixture());
+    duplicate_pages(&mut doc, &[2], Some(0)).unwrap();
+    let doc = open(write_full(&doc, &SaveOptions::default()).unwrap());
+    assert_eq!(labels(&doc), ["Page 3", "Page 1", "Page 2", "Page 3"]);
+    // An index past the end lands at the end.
+    let mut doc = open(fixture());
+    duplicate_pages(&mut doc, &[0], Some(99)).unwrap();
+    let doc = open(write_full(&doc, &SaveOptions::default()).unwrap());
+    assert_eq!(labels(&doc), ["Page 1", "Page 2", "Page 3", "Page 1"]);
 }
 
 #[test]
@@ -2463,7 +2595,7 @@ fn import_can_merge_into_same_named_fields_instead() {
 #[test]
 fn duplicating_a_page_with_a_field_keeps_the_field_name() {
     let mut doc = doc_with_field("Text1");
-    crate::duplicate_pages(&mut doc, &[0]).unwrap();
+    crate::duplicate_pages(&mut doc, &[0], None).unwrap();
     assert_eq!(crate::page_count(&doc).unwrap(), 2);
     assert_eq!(form_field_names(&doc), ["Text1", "Text1"], "nothing renamed");
 }
@@ -2656,4 +2788,36 @@ fn a_chain_of_objects_too_deep_to_copy_is_refused_and_leaves_the_destination_alo
         .unwrap()
         .join();
     assert!(run.is_ok(), "the copy must not overflow the stack");
+}
+
+#[test]
+fn rotate_repeated_indices_accumulate_from_the_current_page_value() {
+    for level in 0..3 {
+        for indices in [vec![0, 0], vec![0, 1, 0]] {
+            let mut doc = open(fixture());
+            let rotation = doc.add(Object::Int(90));
+            let page = pages(&doc).unwrap()[0].obj;
+            let target = match level {
+                0 => page,
+                1 => doc.get(page).as_dict().unwrap().reference(b"Parent").unwrap(),
+                _ => pages_root(&doc).unwrap(),
+            };
+            doc.update_dict(target, |d| d.set(b"Rotate".to_vec(), Object::Ref(rotation))).unwrap();
+            let mut doc = open(write_full(&doc, &SaveOptions::default()).unwrap());
+            let rotation = walk(&doc).unwrap()[0].1.reference(b"Rotate").unwrap();
+            let original_labels = labels(&doc);
+            rotate_pages(&mut doc, &indices, 90).unwrap();
+            assert_eq!(page_rotation(&doc, 0).unwrap(), 270, "level {level}, indices {indices:?}");
+            assert_eq!(*doc.get(rotation), Object::Int(90), "shared source angle is unchanged");
+            for saved in [write_incremental(&doc, &SaveOptions::default()).unwrap(), write_full(&doc, &SaveOptions::default()).unwrap()] {
+                let reopened = open(saved.clone());
+                assert_eq!(page_rotation(&reopened, 0).unwrap(), 270);
+                assert_eq!(page_rotation(&reopened, 1).unwrap(), if indices.len() == 3 { 180 } else { 90 });
+                assert_eq!(page_rotation(&reopened, 2).unwrap(), 90);
+                assert_eq!(labels(&reopened), original_labels);
+                let independent = hayro_syntax::Pdf::new(saved).unwrap();
+                assert_eq!(independent.pages()[0].render_dimensions(), (400.0, 300.0));
+            }
+        }
+    }
 }

@@ -282,6 +282,7 @@
 	Flatten Fill & Sign when saving	Ενσωμάτωση συμπληρώσεων και υπογραφών κατά την αποθήκευση
 	Text, marks and signatures become part of the page. Other comments stay editable.	Το κείμενο, τα σημάδια και οι υπογραφές γίνονται μέρος της σελίδας. Τα υπόλοιπα σχόλια παραμένουν επεξεργάσιμα.
 	Current page — type a page number or label (such as iv) and press Enter	Τρέχουσα σελίδα — πληκτρολογήστε αριθμό ή ετικέτα σελίδας (π.χ. iv) και πατήστε Enter
+	Zoom — type a percentage and press Enter	Ζουμ — πληκτρολογήστε ένα ποσοστό και πατήστε Enter
 	Files you open in PdfCraft appear here. Drop a PDF anywhere to open it.	Τα αρχεία που ανοίγετε στο PdfCraft εμφανίζονται εδώ. Σύρετε ένα PDF οπουδήποτε για να το ανοίξετε.
 	Scripts run in a sandbox without file or network access. With JavaScript off, Acrobat's standard format, validate and calculate functions still work.	Τα σενάρια εκτελούνται σε απομονωμένο περιβάλλον χωρίς πρόσβαση σε αρχεία ή δίκτυο. Με απενεργοποιημένη τη JavaScript, οι τυπικές λειτουργίες μορφοποίησης, επικύρωσης και υπολογισμού του Acrobat εξακολουθούν να λειτουργούν.
 	Move up	Μετακίνηση πάνω

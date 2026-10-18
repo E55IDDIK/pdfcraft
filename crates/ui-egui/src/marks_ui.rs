@@ -28,8 +28,10 @@ pub struct PageRange {
 }
 
 impl Default for PageRange {
+    /// From the first page to the last: `to` starts past any page count, and the range field
+    /// shows (and clamps it to) the document's last page.
     fn default() -> Self {
-        Self { all: true, from: 1, to: 1, subset: Subset::All }
+        Self { all: true, from: 1, to: usize::MAX, subset: Subset::All }
     }
 }
 
@@ -53,9 +55,6 @@ impl PageRange {
             widgets::radio_value(ui, &mut self.all, false, tl!("Pages from"));
             ui.add_enabled(!self.all, egui::DragValue::new(&mut self.from).range(1..=count.max(1)));
             ui.label(tl!("to"));
-            if self.to == 1 && self.from == 1 {
-                self.to = count.max(1);
-            }
             ui.add_enabled(!self.all, egui::DragValue::new(&mut self.to).range(1..=count.max(1)));
             ui.label(tl!("Subset"));
             let label = match self.subset {
@@ -519,6 +518,11 @@ mod tests {
         assert_eq!(r.pages(6), [1, 3, 5]);
         let r = PageRange { all: true, subset: Subset::Odd, ..PageRange::default() };
         assert_eq!(r.pages(5), [0, 2, 4]);
+        // Not all pages: by default up to the last one; a single page is a range too.
+        let r = PageRange { all: false, ..PageRange::default() };
+        assert_eq!(r.pages(4), [0, 1, 2, 3]);
+        let r = PageRange { all: false, from: 1, to: 1, subset: Subset::All };
+        assert_eq!(r.pages(38), [0]);
     }
 
     #[test]

@@ -285,6 +285,38 @@ fn certifying_without_a_visible_signature() {
     h.get_by_label_contains("Certified by Test Signer EC");
 }
 
+#[test]
+fn save_as_keeps_a_signed_document_incremental() {
+    // #2165: Save As to a new file rewrites unsigned documents in full; a signed one is appended
+    // to, or its signature would no longer cover the file.
+    let p12 = concat!(env!("CARGO_MANIFEST_DIR"), "/../sign/tests/data/ec-p256.p12");
+    let digital_id = pdfcraft_engine::sign::pkcs12::open(&std::fs::read(p12).unwrap(), "test").unwrap();
+    let mut s = pdfcraft_engine::Session::new();
+    let id = s.open("contract.pdf", None, std::sync::Arc::new(FIXTURE.to_vec()), None).unwrap();
+    let opts = pdfcraft_engine::SignOptions { page: 0, rect: Some([20.0, 20.0, 180.0, 60.0]), ..Default::default() };
+    let signed = s.sign(id, &digital_id, opts).unwrap();
+    let out = dir().join("copy.pdf");
+    let (bytes, cert) = (signed.to_vec(), digital_id.certificate.clone());
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("contract.pdf", None, bytes).expect("opens");
+        app.session.set_trusted_certificates(vec![cert]);
+        app
+    });
+    h.run_steps(4);
+    let status = |h: &Harness<'static, PdfCraftApp>| {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().signatures.iter().find(|x| x.signed).map(|x| x.status)
+    };
+    assert_eq!(status(&h), Some(SignatureStatus::Valid));
+    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+    assert!(h.state_mut().save_active(pdfcraft_ui_egui::SaveTarget::As), "a signed document can be saved as a copy");
+    let saved = std::fs::read(&out).expect("file written");
+    assert!(saved.starts_with(&signed), "the signed revision is kept as it was");
+    assert_eq!(status(&h), Some(SignatureStatus::Valid));
+}
+
 /// The fixture with an empty signature field across the bottom of the page.
 const WITH_FIELD: &[u8] = b"%PDF-1.7
 1 0 obj << /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >> endobj

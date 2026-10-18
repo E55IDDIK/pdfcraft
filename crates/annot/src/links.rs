@@ -178,6 +178,19 @@ fn write_style(d: &mut Dict, s: &LinkStyle) {
     d.set(b"H".to_vec(), Object::name(s.highlight.code()));
 }
 
+/// Bytes of `u` as a 7-bit ASCII URI string (§12.6.4.8).
+fn uri_bytes(u: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(u.len());
+    for &b in u.as_bytes() {
+        if (0x21..=0x7e).contains(&b) {
+            out.push(b);
+        } else {
+            out.extend_from_slice(format!("%{b:02X}").as_bytes());
+        }
+    }
+    out
+}
+
 fn write_action(doc: &Document, d: &mut Dict, a: &LinkAction) -> Result<(), AnnotError> {
     match a {
         LinkAction::Page(p) => {
@@ -194,7 +207,7 @@ fn write_action(doc: &Document, d: &mut Dict, a: &LinkAction) -> Result<(), Anno
             let mut act = Dict::new();
             act.set(b"S".to_vec(), Object::name("URI"));
             // URIs are 7-bit ASCII strings (§12.6.4.8).
-            act.set(b"URI".to_vec(), PdfString::literal(u.as_bytes().to_vec()));
+            act.set(b"URI".to_vec(), PdfString::literal(uri_bytes(u)));
             d.set(b"A".to_vec(), Object::Dict(act));
         }
         LinkAction::Other(_) => {}

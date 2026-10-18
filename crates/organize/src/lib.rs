@@ -113,11 +113,15 @@ pub fn pages(doc: &Document) -> Result<Vec<PageRef>, OrganizeError> {
 pub fn page_rotation(doc: &Document, index: usize) -> Result<i64, OrganizeError> {
     let pages = walk(doc)?;
     let (_, attrs) = pages.get(index).ok_or(OrganizeError::NoSuchPage(index))?;
-    Ok(attrs.int(b"Rotate").unwrap_or(0).rem_euclid(360))
+    Ok(resolved_rotation(doc, attrs).rem_euclid(360))
 }
 
 pub fn page_count(doc: &Document) -> Result<usize, OrganizeError> {
     Ok(walk(doc)?.len())
+}
+
+fn resolved_rotation(doc: &Document, attrs: &Dict) -> i64 {
+    attrs.get(b"Rotate").and_then(|value| doc.resolve(value).as_int()).unwrap_or(0)
 }
 
 /// Rebuild the page tree as one flat node with `order` as its kids (attributes pushed down).
@@ -201,7 +205,10 @@ pub fn rotate_pages(doc: &mut Document, indices: &[usize], degrees: i64) -> Resu
     let delta = degrees.rem_euclid(360);
     for &i in indices {
         let (page, inherited) = &all[i];
-        let current = doc.get(*page).as_dict().and_then(|d| d.int(b"Rotate")).or_else(|| inherited.int(b"Rotate")).unwrap_or(0);
+        // Repeated indices must see earlier edits instead of the page walk's snapshot.
+        let current_page = doc.get(*page);
+        let current_attrs = current_page.as_dict().filter(|attrs| attrs.get(b"Rotate").is_some()).unwrap_or(inherited);
+        let current = resolved_rotation(doc, current_attrs);
         let new = (current.rem_euclid(360) + delta).rem_euclid(360);
         doc.update_dict(*page, |d| d.set(b"Rotate".to_vec(), Object::Int(new)))?;
     }
@@ -472,9 +479,30 @@ pub fn move_pages(doc: &mut Document, indices: &[usize], to: usize) -> Result<()
     rebuild(doc, &rest)
 }
 
-/// Duplicate pages: copies of `indices` (in order) are inserted after the last of them, sharing
+/// Reverse the order of the pages at `indices` among the positions they occupy; every other
+/// page stays where it is. Fewer than two distinct pages is refused, since nothing would change.
+pub fn reverse_pages(doc: &mut Document, indices: &[usize]) -> Result<(), OrganizeError> {
+    let mut all = walk(doc)?;
+    check(indices, all.len())?;
+    let mut slots = indices.to_vec();
+    slots.sort_unstable();
+    slots.dedup();
+    if slots.len() < 2 {
+        return Err(OrganizeError::Invalid("reversing needs at least two pages".into()));
+    }
+    let pages: Vec<(ObjRef, Dict)> = slots.iter().filter_map(|i| all.get(*i).cloned()).collect();
+    for (slot, page) in slots.iter().zip(pages.into_iter().rev()) {
+        if let Some(entry) = all.get_mut(*slot) {
+            *entry = page;
+        }
+    }
+    rebuild(doc, &all)
+}
+
+/// Duplicate pages: copies of `indices` (in order) are inserted at `at` in the page order
+/// (clamped to the document's end), or after the last of them when `at` is `None`, sharing
 /// fonts and images with the originals.
-pub fn duplicate_pages(doc: &mut Document, indices: &[usize]) -> Result<(), OrganizeError> {
+pub fn duplicate_pages(doc: &mut Document, indices: &[usize], at: Option<usize>) -> Result<(), OrganizeError> {
     let n = page_count(doc)?;
     check(indices, n)?;
     let Some(&last) = indices.iter().max() else { return Ok(()) };
@@ -482,7 +510,7 @@ pub fn duplicate_pages(doc: &mut Document, indices: &[usize]) -> Result<(), Orga
     order.sort_unstable();
     order.dedup();
     let src = doc.clone();
-    import_pages(doc, &src, &order, last + 1).map(|_| ())
+    import_pages(doc, &src, &order, at.unwrap_or(last + 1)).map(|_| ())
 }
 
 /// Replace Pages: the content of `targets` (in order) is replaced by that of `src_pages` of
@@ -536,6 +564,54 @@ pub fn insert_blank_page(doc: &mut Document, at: usize, width: f64, height: f64)
 /// Document information keys editable in Document Properties ▸ Description.
 pub const INFO_KEYS: [&str; 4] = ["Title", "Author", "Subject", "Keywords"];
 
+/// The document-information entries the spec names (ISO 32000-2 table 349). Any other key in
+/// `/Info` is a custom property (Document Properties ▸ Custom).
+pub const STANDARD_INFO_KEYS: [&str; 9] = ["Title", "Author", "Subject", "Keywords", "Creator", "Producer", "CreationDate", "ModDate", "Trapped"];
+
+/// Longest custom property name accepted, in bytes: the name length every reader is asked to
+/// accept (§7.3.5, Annex C).
+pub const MAX_CUSTOM_KEY_LEN: usize = 127;
+
+/// The custom document properties: every `/Info` entry whose key the spec does not name and whose
+/// value is text, in the dictionary's order, as (name, text), the text without NUL or whitespace
+/// padding and entries that are only padding left out. At most 256 are listed.
+pub fn custom_info(doc: &Document) -> Vec<(String, String)> {
+    let Some(info) = doc.trailer().get(b"Info").map(|o| doc.resolve(o)) else { return Vec::new() };
+    let Some(d) = info.as_dict() else { return Vec::new() };
+    d.iter()
+        .filter(|(k, _)| !STANDARD_INFO_KEYS.iter().any(|s| s.as_bytes() == k.as_slice()))
+        .filter_map(|(k, v)| {
+            // Padding (\0s and whitespace, in any mix) is not part of the value, and a value that
+            // is only padding is no property. Filtered before the cap, so blank entries can't
+            // crowd real ones out.
+            let text = doc.resolve(v).as_string()?.to_text();
+            let text = text.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+            (!text.is_empty()).then(|| (String::from_utf8_lossy(k).into_owned(), text.to_owned()))
+        })
+        .take(256)
+        .collect()
+}
+
+/// Whether `name` may be a custom property's key: not one the spec names (those are the
+/// Description fields), not empty, at most [`MAX_CUSTOM_KEY_LEN`] bytes, and without the
+/// characters a name cannot carry unescaped (whitespace, the delimiters `()<>[]{}/%` and `#`),
+/// so every reader shows the same name. Acrobat refuses the standard and empty names too.
+pub fn check_custom_key(name: &str) -> Result<(), OrganizeError> {
+    if name.is_empty() {
+        return Err(OrganizeError::Invalid("a custom property needs a name".into()));
+    }
+    if STANDARD_INFO_KEYS.contains(&name) {
+        return Err(OrganizeError::Invalid(format!("{name} is a standard document property, not a custom one")));
+    }
+    if name.len() > MAX_CUSTOM_KEY_LEN {
+        return Err(OrganizeError::Invalid(format!("a custom property name is at most {MAX_CUSTOM_KEY_LEN} bytes")));
+    }
+    if let Some(c) = name.chars().find(|c| c.is_whitespace() || c.is_control() || "()<>[]{}/%#".contains(*c)) {
+        return Err(OrganizeError::Invalid(format!("a custom property name can't contain {c:?}")));
+    }
+    Ok(())
+}
+
 /// Read a document-information entry as text.
 pub fn info(doc: &Document, key: &str) -> Option<String> {
     let info = doc.trailer().get(b"Info").map(|o| doc.resolve(o))?;
@@ -548,6 +624,9 @@ pub fn info(doc: &Document, key: &str) -> Option<String> {
 /// in the XMP packet, and viewers that read XMP first show its value: the packet's property is
 /// changed (or removed) to match (see `xmp`).
 pub fn set_info(doc: &mut Document, key: &str, value: &str) -> Result<(), OrganizeError> {
+    if !STANDARD_INFO_KEYS.contains(&key) {
+        check_custom_key(key)?;
+    }
     let value = value.trim();
     let entry = (!value.is_empty()).then(|| Object::String(PdfString::text(value)));
     set_info_entry(doc, key.as_bytes(), entry)?;

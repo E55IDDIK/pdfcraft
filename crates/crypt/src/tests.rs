@@ -212,6 +212,28 @@ fn permission_bits_follow_table_22() {
     assert!(p.modify(), "owners ignore /P");
 }
 
+#[test]
+fn perms_limits_what_an_edited_p_grants() {
+    let made = new(Algorithm::Aes256, "user pw", "owner pw", 0b0100); // print only
+    let open = |d: &EncryptDict, pw| SecurityHandler::open(d.clone(), ID, Some(pw)).unwrap().permissions();
+    let mut d = made.dict().clone();
+    assert_eq!(open(&d, "user pw").bits, d.p, "/P and /Perms agree");
+    d.p = -4; // /P edited to allow everything, /Perms as written
+    let p = open(&d, "user pw");
+    assert!(p.print() && !p.modify() && !p.copy() && !p.annotate() && !p.fill_forms() && !p.assemble());
+    assert!(open(&d, "owner pw").modify(), "owners ignore /P");
+    d.p = -3904; // a stricter /P still applies
+    assert!(!open(&d, "user pw").print());
+    // No /Perms, or one that does not decrypt to an `adb` block: /P as before.
+    for perms in [Vec::new(), vec![0; 16], made.dict().perms[..15].to_vec()] {
+        let d = EncryptDict { p: -4, perms, ..made.dict().clone() };
+        assert!(open(&d, "user pw").modify());
+    }
+    // R2 to R4 have no /Perms: /P is part of their file key, so an edited /P does not open.
+    let d = EncryptDict { p: -4, ..new(Algorithm::Aes128, "user pw", "owner pw", 0b0100).dict().clone() };
+    assert_eq!(SecurityHandler::open(d, ID, Some("user pw")).unwrap_err(), CryptError::WrongPassword);
+}
+
 proptest::proptest! {
     #[test]
     fn malformed_dictionaries_never_panic(o in proptest::collection::vec(proptest::num::u8::ANY, 0..60),

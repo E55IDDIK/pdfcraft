@@ -336,3 +336,41 @@ fn an_earlier_revision_opens_with_the_documents_own_credentials() {
         assert_eq!(content(&current.open_with_same_credentials(Arc::new(fixture())).unwrap()), SECRET, "{alg:?}");
     }
 }
+
+/// `protect`, with the `/Encrypt` dictionary written inline in the trailer, as MuPDF writes it,
+/// instead of as an indirect object.
+fn protect_inline(alg: Algorithm, user: &str, owner: &str) -> Vec<u8> {
+    let mut doc = Document::open(Arc::new(fixture())).unwrap();
+    doc.set_encryption(&NewEncryption {
+        algorithm: alg,
+        user_password: user,
+        owner_password: owner,
+        permissions: -1,
+        encrypt_metadata: true,
+        seed: [9; 32],
+    })
+    .unwrap();
+    let dict = doc.get(doc.trailer().reference(b"Encrypt").unwrap()).as_dict().cloned().unwrap();
+    doc.trailer_mut().set(b"Encrypt".to_vec(), Object::Dict(dict));
+    write_full(&doc, &SaveOptions::default()).unwrap()
+}
+
+/// MuPDF writes `/Encrypt` inline in the trailer, so removing it changes no object. It is still
+/// an unsaved change, and saving must write a file that opens without a password (#2661).
+#[test]
+fn removing_an_inline_encrypt_dictionary_leaves_an_unencrypted_file() {
+    for alg in ALL {
+        let bytes = Arc::new(protect_inline(alg, "user", "owner"));
+        assert!(matches!(Document::open(bytes.clone()), Err(CosError::NeedsPassword)), "{alg:?}");
+        let mut doc = Document::open_with_password(bytes, Some("owner")).unwrap();
+        assert!(matches!(doc.trailer().get(b"Encrypt"), Some(Object::Dict(_))), "{alg:?}: inline");
+        assert!(!doc.is_modified(), "{alg:?}");
+        doc.remove_encryption();
+        assert!(doc.is_modified(), "{alg:?}: removing security is an unsaved change");
+        let plain = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        let again = Document::open(Arc::new(plain.clone())).unwrap_or_else(|e| panic!("{alg:?}: {e:?}"));
+        assert!(again.security().is_none() && !again.trailer().contains(b"Encrypt"), "{alg:?}");
+        assert_eq!(content(&again), SECRET, "{alg:?}");
+        assert!(hayro_syntax::Pdf::new(plain).is_ok(), "{alg:?}");
+    }
+}

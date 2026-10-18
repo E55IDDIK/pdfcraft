@@ -119,6 +119,7 @@ pub struct Report {
     pub forms_removed: usize,
     pub annotations: usize,
     pub fields: usize,
+    pub replacement_text: usize,
     /// Structure elements that lost alternate/actual text or emptied marked content.
     pub tags: usize,
     /// The form was an AcroForm+XFA form and its `/XFA` packets (which still held redacted field
@@ -334,6 +335,7 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
     let mut doomed_fields: Vec<String> = Vec::new();
     // The original image and form XObjects the rewrite drops or replaces, on any page.
     let mut doomed_xobjects: Vec<ObjRef> = Vec::new();
+    let mut retired_properties = Vec::new();
     let widget_owner: Vec<(ObjRef, String)> =
         pdfcraft_forms::fields(doc).into_iter().flat_map(|f| f.widgets.iter().map(|w| (w.obj, f.name.clone())).collect::<Vec<_>>()).collect();
 
@@ -353,10 +355,14 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
         // leave the text in place, refuse the whole operation (the caller keeps the previous
         // document). The error does not claim the text was under the mark. Full vertical-text
         // removal is a future enhancement.
+        if let Some(error) = out.error {
+            return Err(error.into());
+        }
         if out.vertical {
             return Err(RedactError::VerticalText(pi + 1));
         }
         doomed_xobjects.extend_from_slice(&out.doomed);
+        retired_properties.extend(out.retired_properties);
         let mut new_list = list.clone();
         let mut changed = false;
         for (i, new) in out.streams.into_iter().enumerate() {
@@ -393,6 +399,16 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
                 }
                 res.set(b"XObject".to_vec(), Object::Dict(xo));
             }
+            let (_, cleaned_data) = page_streams(
+                doc,
+                &{
+                    let mut cleaned_page = page.dict.clone();
+                    cleaned_page.set(b"Contents".to_vec(), Object::Array(new_list.clone()));
+                    cleaned_page
+                },
+                pi,
+            )?;
+            retired_properties.extend(interp::prune_properties(doc, &mut res, &cleaned_data)?);
             doc.update_dict(page.obj, |d| {
                 d.set(b"Contents".to_vec(), Object::Array(new_list));
                 d.set(b"Resources".to_vec(), Object::Dict(res));
@@ -437,6 +453,32 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
                 } else {
                     report.annotations += 1;
                 }
+            }
+        }
+        // Replies (`/IRT`, ISO 32000-2 §12.5.6.2) to a removed annotation go too, and replies to
+        // those: a reply placed elsewhere would keep its parent — the comment and the QuadPoints
+        // of the redacted words — in the file through its `/IRT` (#2659). Each pass removes at
+        // least one more annotation of this page or stops, so it ends.
+        let replies: Vec<(ObjRef, ObjRef)> = annots
+            .iter()
+            .filter_map(Object::as_ref)
+            .filter_map(|r| {
+                let obj = doc.get(r);
+                let d = obj.as_dict()?;
+                (d.name(b"Subtype") != Some(b"Widget")).then_some(())?;
+                Some((r, d.get(b"IRT").and_then(Object::as_ref)?))
+            })
+            .collect();
+        loop {
+            let before = removed.len();
+            for (r, parent) in &replies {
+                if !removed.contains(r) && removed.contains(parent) {
+                    removed.push(*r);
+                    report.annotations += 1;
+                }
+            }
+            if removed.len() == before {
+                break;
             }
         }
         let kept: Vec<Object> = annots
@@ -488,7 +530,7 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
 
     // A removed image or form must not stay reachable through another resource dictionary (an
     // inherited or shared /Resources): a full save keeps whatever is still referenced.
-    interp::unlink_doomed(doc, &doomed_xobjects)?;
+    interp::unlink_doomed(doc, &doomed_xobjects, &retired_properties)?;
 
     // 5. Verify: nothing readable may remain under a region.
     let mut residue = 0;

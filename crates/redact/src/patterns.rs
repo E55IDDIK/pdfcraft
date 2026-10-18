@@ -140,14 +140,16 @@ fn address_char(c: char) -> bool {
 
 fn email(s: &[char], i: usize) -> Option<usize> {
     let local = |c: &char| address_char(*c) || "._%+-".contains(*c);
-    if !address_char(s[i]) || i.checked_sub(1).and_then(|p| s.get(p)).is_some_and(local) {
+    // A match starts at the first character of a run of local characters, which may be
+    // punctuation ("_admin@host.com"), but the run needs a letter or digit.
+    if !local(&s[i]) || i.checked_sub(1).and_then(|p| s.get(p)).is_some_and(local) {
         return None;
     }
     let mut j = i;
     while j < s.len() && local(&s[j]) {
         j += 1;
     }
-    if s.get(j) != Some(&'@') {
+    if s.get(j) != Some(&'@') || !s[i..j].iter().any(|c| address_char(*c)) {
         return None;
     }
     let d0 = j + 1;
@@ -181,12 +183,33 @@ fn credit_card(s: &[char], i: usize) -> Option<usize> {
     if !s[i].is_ascii_digit() || digit(i.checked_sub(1).and_then(|p| s.get(p))) {
         return None;
     }
-    let (end, n) = digit_run(s, i, &[' ', '-'], 23);
-    if !(13..=19).contains(&n) || digit(s.get(end)) {
+    // Room for the longest card (19 digits in groups, 23 characters) and a tail of up to four digits.
+    let (end, n) = digit_run(s, i, &[' ', '-'], 29);
+    // A run longer than that is some other, longer number.
+    if end == i || run_continues(s, end - 1, 1, &[' ', '-']) {
         return None;
     }
-    let digits: Vec<u32> = s[i..end].iter().filter_map(|c| c.to_digit(10)).collect();
-    luhn(&digits).then_some(end - i)
+    // The longest run may carry a trailing number (an expiry, a year, a CVV), so try it and then
+    // each shorter run ending at a group boundary, longest first. The dropped tail is at most four
+    // digits, so a longer number (an IBAN's digits) doesn't match on a prefix.
+    let mut count = n;
+    for e in (i + 1..=end).rev() {
+        if n - count > 4 {
+            break;
+        }
+        if !s.get(e - 1).is_some_and(char::is_ascii_digit) {
+            continue;
+        }
+        let boundary = if e == end { !digit(s.get(end)) } else { matches!(s.get(e), Some(' ' | '-')) };
+        if boundary && (13..=19).contains(&count) {
+            let digits: Vec<u32> = s[i..e].iter().filter_map(|c| c.to_digit(10)).collect();
+            if luhn(&digits) {
+                return Some(e - i);
+            }
+        }
+        count = count.saturating_sub(1);
+    }
+    None
 }
 
 fn ssn(s: &[char], i: usize) -> Option<usize> {
@@ -402,6 +425,18 @@ mod tests {
     }
 
     #[test]
+    fn emails_with_a_leading_punctuation_character() {
+        for lead in ["_", "-", ".", "%", "+"] {
+            let address = format!("{lead}john@example.com");
+            assert_eq!(found(Pattern::Email, &format!("Write to {address} now")), [address.as_str()], "lead {lead:?}");
+        }
+        // A run of local characters is still matched whole, never from its middle.
+        assert_eq!(found(Pattern::Email, "a.b@x.com, foo_john@example.com"), ["a.b@x.com", "foo_john@example.com"]);
+        // Punctuation alone is no local part.
+        assert_eq!(found(Pattern::Email, "Write to ..@example.com or -@example.com"), Vec::<String>::new());
+    }
+
+    #[test]
     fn internationalized_emails() {
         assert_eq!(
             found(Pattern::Email, "Yazın: ayşe.yılmaz@örnek.com.tr, ÇAĞLAR@ŞİRKET.COM.TR; müller@bücher.de, иван@пример.рф, josé@correo.es."),
@@ -419,6 +454,18 @@ mod tests {
             found(Pattern::CreditCard, "Visa 4111 1111 1111 1111, bad 4111 1111 1111 1112, amex 3782-822463-10005"),
             ["4111 1111 1111 1111", "3782-822463-10005"]
         );
+    }
+
+    #[test]
+    fn credit_card_followed_by_another_number() {
+        for tail in ["12/26", "2026", "123", "12 26"] {
+            assert_eq!(found(Pattern::CreditCard, &format!("Card 4111 1111 1111 1111 {tail}")), ["4111 1111 1111 1111"], "tail {tail}");
+        }
+        assert_eq!(found(Pattern::CreditCard, "Card 3782-822463-10005 123"), ["3782-822463-10005"]);
+        // A run that is not a card at any group boundary still matches nothing.
+        assert_eq!(found(Pattern::CreditCard, "Card 4111 1111 1111 1112 12/26"), Vec::<String>::new());
+        // A longer grouped number doesn't match on a card-shaped prefix.
+        assert_eq!(found(Pattern::CreditCard, "IBAN 4111 1111 1111 1111 0000 0000"), Vec::<String>::new());
     }
 
     #[test]

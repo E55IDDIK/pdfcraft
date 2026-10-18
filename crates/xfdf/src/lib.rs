@@ -615,7 +615,7 @@ pub fn export_data(doc: &Document, format: Format) -> String {
             out
         }
         Format::Csv => {
-            let q = |s: &str| if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
+            let q = |s: &str| if s.contains([',', '"', '\n', '\r', '\t']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
             format!(
                 "{}\n{}\n",
                 fields.iter().map(|f| q(&f.0)).collect::<Vec<_>>().join(","),
@@ -1044,7 +1044,7 @@ pub fn merge_csv(files: &[Vec<(String, Vec<String>)>]) -> String {
             }
         }
     }
-    let q = |s: &str| if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
+    let q = |s: &str| if s.contains([',', '"', '\n', '\r', '\t']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
     let mut out = columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(",");
     out.push('\n');
     for f in files {
@@ -1104,6 +1104,31 @@ fn import_fdf(doc: &mut Document, bytes: &[u8]) -> Result<Report, DataError> {
     Ok(report)
 }
 
+// Inspect the first logical record: tabs within quoted CSV cells are data. A quote
+// in the middle of an unquoted TSV name stays literal, as in the TSV reader.
+fn has_tab_delimiter(text: &str) -> bool {
+    let mut quoted = false;
+    let mut cell_start = true;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+            }
+            '"' if quoted || cell_start => {
+                quoted = !quoted;
+                cell_start = false;
+            }
+            '\t' if !quoted => return true,
+            '\r' | '\n' if !quoted => return false,
+            ',' if !quoted => cell_start = true,
+            _ => cell_start = false,
+        }
+    }
+    // An unclosed quote can be a literal TSV field-name character.
+    quoted && text.lines().next().is_some_and(|line| line.contains('\t'))
+}
+
 /// Form data from XML, CSV or tab-delimited text.
 fn import_table(doc: &mut Document, text: &str) -> Result<Report, DataError> {
     let mut report = Report::default();
@@ -1121,7 +1146,7 @@ fn import_table(doc: &mut Document, text: &str) -> Result<Report, DataError> {
                 (name, vec![c.children().filter(|node| node.is_text()).filter_map(|node| node.text()).collect()])
             })
             .collect()
-    } else if t.lines().next().is_some_and(|l| l.contains('\t')) {
+    } else if has_tab_delimiter(t) {
         tab_delimited(t)?
     } else {
         // CSV with quotes: a quoted value may hold commas, doubled quotes and line breaks.

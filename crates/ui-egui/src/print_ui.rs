@@ -1103,7 +1103,7 @@ pub(crate) fn body(
             );
             // Advanced (Acrobat's Advanced Print Setup): print as image. Folded unless it is on.
             ui.add_space(6.0);
-            egui::CollapsingHeader::new(egui::RichText::new(tl!("Advanced").to_uppercase()).font(theme::semibold(10.5)).color(t.text_faint))
+            egui::CollapsingHeader::new(egui::RichText::new(crate::i18n::upper_label("Advanced")).font(theme::semibold(10.5)).color(t.text_faint))
                 .id_salt("print-advanced")
                 .default_open(d.as_image)
                 .show(ui, |ui| {

@@ -784,7 +784,16 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
                 return Err(EditError::Invalid("the image move is too large".into()));
             };
             plans.remove(&(stream, index));
-            clips.insert((stream, at), c);
+            // A `cm` an earlier move put before the clip takes this move too: `c · prev` is the
+            // same CTM as `prev` followed by another `cm c`, without one more operator per move.
+            let folded = at
+                .checked_sub(1)
+                .and_then(|i| Some((i, c.then(&Matrix(ops.get(i).filter(|op| op.is("cm"))?.nums::<6>()?)))))
+                .filter(|(_, m)| m.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12));
+            match folded {
+                Some((i, m)) => clips.insert((stream, i), (m, false)),
+                None => clips.insert((stream, at), (c, true)),
+            };
         }
         // An image already alone in `q cm Do Q` moves by changing that `cm`, not by nesting another.
         let mut folds = std::collections::BTreeMap::new();
@@ -799,8 +808,8 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
             folds.insert(at, folded);
         }
         let changed = crate::text::splice(&pieces, &ops, |index| {
-            if let Some(c) = clips.remove(&(stream, index)) {
-                return (vec![Op::new("cm", c.0.map(Object::Real).to_vec())], true);
+            if let Some((c, keep)) = clips.remove(&(stream, index)) {
+                return (vec![Op::new("cm", c.0.map(Object::Real).to_vec())], keep);
             }
             if let Some(m) = folds.remove(&index) {
                 return (vec![Op::new("cm", m.0.map(Object::Real).to_vec())], false);

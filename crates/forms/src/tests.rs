@@ -1412,6 +1412,54 @@ fn detection_finds_blanks_rules_boxes_and_names_them() {
 }
 
 #[test]
+fn detection_makes_a_row_of_touching_cells_one_comb_field() {
+    use crate::detect::*;
+    let w = |t: &str, x0: f64, y0: f64, x1: f64| Word { text: t.into(), rect: [x0, y0, x1, y0 + 10.0] };
+    let words = vec![
+        w("Postcode", 40.0, 205.0, 85.0),
+        w("A", 88.0, 205.0, 95.0),
+        w("Postcode", 40.0, 105.0, 85.0),
+        w("B", 88.0, 105.0, 95.0),
+        w("Yes", 70.0, 41.0, 90.0),
+    ];
+    let row = |n: usize, x: f64, y: f64, cw: f64, ch: f64| (0..n).map(move |i| [x + i as f64 * cw, y, x + (i + 1) as f64 * cw, y + ch]);
+    // 18 x 22 cells (too tall for a check box), 16 x 20 cells (each one check-box sized) drawn
+    // right to left, and a lone square.
+    let mut boxes: Vec<[f64; 4]> = row(5, 120.0, 200.0, 18.0, 22.0).collect();
+    boxes.extend(row(10, 120.0, 100.0, 16.0, 20.0).rev());
+    boxes.push([50.0, 40.0, 62.0, 52.0]);
+    let found = detect(&words, &Shapes { boxes, rules: Vec::new() }, &[], &[]);
+    let got: Vec<(&str, &Kind, [f64; 4])> = found.iter().map(|c| (c.name.as_str(), &c.kind, c.rect)).collect();
+    assert_eq!(
+        got,
+        [
+            ("Postcode A", &Kind::Comb { cells: 5 }, [120.0, 200.0, 210.0, 222.0]),
+            ("Postcode B", &Kind::Comb { cells: 10 }, [120.0, 100.0, 280.0, 120.0]),
+            ("Yes", &Kind::CheckBox, [50.0, 40.0, 62.0, 52.0]),
+        ],
+        "{found:?}"
+    );
+    // Squares with a gap between them stay check boxes, and so do touching squares of
+    // different sizes.
+    let apart = Shapes {
+        boxes: vec![[50.0, 40.0, 62.0, 52.0], [66.0, 40.0, 78.0, 52.0], [80.0, 40.0, 92.0, 52.0], [92.0, 40.0, 102.0, 52.0]],
+        rules: Vec::new(),
+    };
+    let kinds: Vec<Kind> = detect(&[], &apart, &[], &[]).into_iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, [Kind::CheckBox, Kind::CheckBox, Kind::CheckBox, Kind::CheckBox]);
+    // An empty table of cells wider than tall (an attendance sheet) is not a comb.
+    let grid = |cw: f64, ch: f64| {
+        (0..3).flat_map(move |r| {
+            (0..3).map(move |c| [100.0 + c as f64 * cw, 300.0 + r as f64 * ch, 100.0 + (c + 1) as f64 * cw, 300.0 + (r + 1) as f64 * ch])
+        })
+    };
+    for (cw, ch) in [(24.0, 18.0), (28.0, 20.0)] {
+        let table = detect(&[], &Shapes { boxes: grid(cw, ch).collect(), rules: Vec::new() }, &[], &[]);
+        assert!(table.is_empty(), "{cw} x {ch}: {table:?}");
+    }
+}
+
+#[test]
 fn page_shapes_reads_boxes_and_rules() {
     let mut doc = fixture();
     let page = pdfcraft_model::pages(&doc)[0].obj;
@@ -2020,6 +2068,29 @@ fn page_shapes_accepts_rectangle_closure_and_paint_variants() {
         let shapes = detection_test_shapes(content.as_bytes());
         assert_eq!(shapes.boxes, [[50.0, 100.0, 170.0, 140.0]], "{end}");
         assert!(shapes.rules.is_empty(), "rectangle edges must not become extra fields: {end}");
+    }
+}
+
+/// #2942: a cell drawn with a point in the middle of each vertical side (the French 2042 form's
+/// letter cells), or on every side, is the rectangle it looks like. A point that turns back
+/// along a side is not on the way between its neighbours, so such a path is still not a box.
+#[test]
+fn page_shapes_reads_rectangles_with_points_along_their_sides() {
+    for content in [
+        "100 100 m 111.1 100 l 111.1 107.35 l 111.1 114.7 l 100 114.7 l 100 107.35 l h f",
+        "100 100 m 105 100 l 111.1 100 l 111.1 107.35 l 111.1 114.7 l 105 114.7 l 100 114.7 l 100 107.35 l h S",
+        "100 107.35 m 100 100 l 111.1 100 l 111.1 114.7 l 100 114.7 l h f",
+    ] {
+        let shapes = detection_test_shapes(content.as_bytes());
+        assert_eq!(shapes.boxes, [[100.0, 100.0, 111.1, 114.7]], "{content}");
+    }
+    for content in [
+        // Out past the corner and back: a spike, not a side.
+        "100 100 m 130 100 l 111.1 100 l 111.1 114.7 l 100 114.7 l h S",
+        // A sixth point off the sides.
+        "100 100 m 111.1 100 l 115 107 l 111.1 114.7 l 100 114.7 l 100 107.35 l h S",
+    ] {
+        assert!(detection_test_shapes(content.as_bytes()).boxes.is_empty(), "{content}");
     }
 }
 

@@ -1329,7 +1329,12 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
     ed.max_width = ed.rect.width();
     let scale = (ed.rect.width() / (ed.source_rect[2] - ed.source_rect[0]).abs().max(0.01)).max(0.01);
     ed.size = (ed.look.size as f32 * scale).clamp(1.0, 300.0);
-    let font = editor_font(&ed.look, ed.size);
+    // egui draws the caret at least one row of this font tall. Each row already has its source
+    // row's height, so the font stays below every row (half the region's smallest size): on a
+    // 12 pt row under a 24 pt title the caret is as tall as the row, not the title.
+    let smallest =
+        ed.source.as_ref().and_then(|(block, lines)| block.lines.iter().filter_map(|i| lines.get(*i)).map(|l| l.size as f32).reduce(f32::min));
+    let font = editor_font(&ed.look, smallest.map_or(ed.size, |s| (s * scale * 0.5).clamp(1.0, 300.0).min(ed.size)));
     let text_color = color32(ed.look.color);
     let mut done = None;
     egui::Area::new(egui::Id::new("edit-text-line")).order(egui::Order::Foreground).fixed_pos(Pos2::new(ed.rect.left(), ed.rect.top())).show(
@@ -1473,6 +1478,21 @@ mod tests {
             extras0: Extras::default(),
         };
         (app, ed)
+    }
+
+    #[test]
+    fn a_loaded_font_is_applied_to_the_paragraph_being_edited() {
+        // Loading a font used to only register it on the page: the paragraph kept its source
+        // face until the font was found again in the document-font menu (#2591).
+        let (mut app, ed) = preview_app();
+        app.views[0].line_editor = Some(ed);
+        let inter = include_bytes!("../../../assets/fonts/Inter-Regular.ttf").to_vec();
+        app.use_files(crate::files::FilePurpose::TextFont { page: 0 }, vec![("Inter-Regular.ttf".into(), inter)]);
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let lines = doc.text_lines(0);
+        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), "Preview text");
+        assert!(lines.iter().all(|l| l.base_font == "Inter-Regular"), "{:?}", lines.iter().map(|l| &l.base_font).collect::<Vec<_>>());
+        assert!(app.views[0].line_editor.is_some(), "the paragraph stays open for editing");
     }
 
     #[test]

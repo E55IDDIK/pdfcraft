@@ -183,7 +183,7 @@ pub fn write_incremental(doc: &Document, opts: &SaveOptions) -> Result<Vec<u8>, 
     }
     // Reconstructed files have no chain to append to; added or removed encryption must
     // rewrite every object; redaction must not leave the old revision behind. All need a full save.
-    if doc.revisions().is_empty() || doc.encryption_changed() || doc.full_save_required() {
+    if doc.reconstructed() || doc.encryption_changed() || doc.full_save_required() {
         return write_full(doc, opts);
     }
     let mut doc = doc.clone();
@@ -193,7 +193,11 @@ pub fn write_incremental(doc: &Document, opts: &SaveOptions) -> Result<Vec<u8>, 
     // allocated once at its exact size: growing a buffer that holds a large original past a
     // guessed capacity would copy the whole file again and keep up to as much again unused.
     let newline = !matches!(original.last(), Some(b'\n' | b'\r'));
-    let base = (original.len() + usize::from(newline)) as u64;
+    // A file with bytes before its `%PDF-` header may count its offsets from the header. The new
+    // section then has to as well: readers take `/Prev` and `startxref` in one convention, and a
+    // mix sends them into reconstruction (#2364).
+    let shift = if doc.revisions().last().is_some_and(|r| r.header_relative) { doc.header_offset() } else { 0 };
+    let base = (original.len() + usize::from(newline)).saturating_sub(shift) as u64;
     let mut out = Vec::new();
     let mut offsets: BTreeMap<u32, (u64, u16, bool)> = BTreeMap::new(); // num → (offset, gen, in use)
     for (num, generation, obj) in doc.overlay_entries() {

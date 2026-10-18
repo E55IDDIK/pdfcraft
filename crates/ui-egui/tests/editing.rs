@@ -352,6 +352,21 @@ fn shift_click_selects_a_range_and_moves_it() {
 }
 
 #[test]
+fn reverse_pages_reverses_the_selection_or_else_the_whole_document() {
+    let mut h = organize(4);
+    assert!(h.state_mut().execute("page.reverse"));
+    h.run_steps(3);
+    assert_eq!(page_texts(h.state()), ["Page 4", "Page 3", "Page 2", "Page 1"]);
+    h.get_by_label("Page 1").click();
+    h.run_steps(1);
+    h.get_by_label("Page 3").click_modifiers(Modifiers::COMMAND);
+    h.run_steps(2);
+    assert!(h.state_mut().execute("page.reverse"));
+    h.run_steps(3);
+    assert_eq!(page_texts(h.state()), ["Page 2", "Page 3", "Page 4", "Page 1"]);
+}
+
+#[test]
 fn command_click_toggles_and_rotation_applies_to_selection() {
     let mut h = organize(3);
     h.get_by_label("Page 1").click();
@@ -517,6 +532,27 @@ fn save_writes_an_incremental_update_and_clears_dirty() {
     assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().bytes.as_slice(), saved.as_slice());
     let reopened = pdfcraft_render::inspect(std::sync::Arc::new(saved), None).unwrap();
     assert_eq!(reopened.pages[2].rotation, 270);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn save_as_to_a_new_file_drops_earlier_revisions() {
+    // #2165: Save As appended a revision, so a deleted page stayed in the new file's first one.
+    let out = temp_path("save-as-clean.pdf");
+    let mut h = organize(3);
+    h.get_by_label("Page 2").hover();
+    h.run_steps(2);
+    h.get_by_label("Delete page 2").click();
+    h.run_steps(3);
+    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+    assert!(h.state_mut().save_active(pdfcraft_ui_egui::SaveTarget::As));
+    let saved = std::fs::read(&out).expect("file written");
+    let count = |needle: &[u8]| saved.windows(needle.len()).filter(|w| *w == needle).count();
+    assert_eq!(count(b"%%EOF"), 1, "one revision only");
+    assert_eq!((count(b"(Page 1)"), count(b"(Page 2)")), (1, 0), "the deleted page's content is gone");
+    assert!(!dirty(&h));
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().bytes.as_slice(), saved.as_slice());
+    assert_eq!(page_texts(h.state()), ["Page 1", "Page 3"]);
     let _ = std::fs::remove_file(out);
 }
 
@@ -2401,6 +2437,81 @@ fn dragging_thumbnails_reorders_pages() {
     assert_eq!(sel, vec![2], "the moved page stays selected");
 }
 
+/// A page drag with the copy modifier held — Ctrl (Option on macOS) — instead of none.
+/// Modifiers are input state: `ModifiersChanged` once, as the column-select drag does.
+fn copy_drag(h: &mut Harness<'static, PdfCraftApp>, from: egui::Pos2, to: egui::Pos2) {
+    page_drag(h, from, to, copy_modifiers(h));
+}
+
+/// The copy modifier of the OS the app reports: Option on macOS, Ctrl elsewhere. That is the OS
+/// the gesture itself reads, so a Mac browser — a wasm build, where `cfg!(target_os = "macos")` is
+/// false — is covered by asking the context rather than the target.
+fn copy_modifiers(h: &Harness<'static, PdfCraftApp>) -> Modifiers {
+    if h.ctx.os() == egui::os::OperatingSystem::Mac { Modifiers::ALT } else { Modifiers::CTRL }
+}
+
+/// Drag the page under `from` to `to` with `modifiers` held for the whole gesture.
+fn page_drag(h: &mut Harness<'static, PdfCraftApp>, from: egui::Pos2, to: egui::Pos2, modifiers: Modifiers) {
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    h.run_steps(1);
+    h.hover_at(from);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.run_steps(1);
+    for k in 1..=5 {
+        h.hover_at(from + (to - from) * (k as f32 / 5.0));
+        h.run_steps(1);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(4);
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(1);
+}
+
+#[test]
+fn dragging_with_the_copy_modifier_copies_the_pages_into_the_gap() {
+    let mut h = organize(3);
+    let before = page_texts(h.state());
+    let grab = |h: &Harness<'static, PdfCraftApp>, label: &str| h.get_by_label(label).rect();
+    let (from, to) = (grab(&h, "Page 1").center(), grab(&h, "Page 3").right_center() - egui::vec2(10.0, 0.0));
+    copy_drag(&mut h, from, to);
+    // The original stays first; a copy of page 1 lands after page 3 (#2997).
+    let after = page_texts(h.state());
+    assert_eq!(after, vec![before[0].clone(), before[1].clone(), before[2].clone(), before[0].clone()], "{after:?}");
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().can_undo(), Some("Duplicate page"));
+    let sel: Vec<usize> = h.state().views[0].selected.iter().copied().collect();
+    assert_eq!(sel, vec![3], "the copy is selected");
+}
+
+/// macOS is not only `cfg!(target_os = "macos")`: the wasm build runs in a Mac browser, where the
+/// cfg is false but the context says Mac. The gesture must follow the context, or Option-drag
+/// there moves the pages instead of copying them (#3092 review).
+#[test]
+fn option_copies_and_ctrl_moves_when_the_context_reports_macos() {
+    let grab = |h: &Harness<'static, PdfCraftApp>, label: &str| h.get_by_label(label).rect();
+    let points = |h: &Harness<'static, PdfCraftApp>| (grab(h, "Page 1").center(), grab(h, "Page 3").right_center() - egui::vec2(10.0, 0.0));
+
+    // Ctrl is not the copy modifier on macOS, so that drag moves the page.
+    let mut h = organize(3);
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let before = page_texts(h.state());
+    let (from, to) = points(&h);
+    page_drag(&mut h, from, to, Modifiers::CTRL);
+    assert_eq!(page_texts(h.state()), vec![before[1].clone(), before[2].clone(), before[0].clone()], "Ctrl moves on macOS");
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().can_undo(), Some("Move page"));
+
+    // Option is, so the same drag drops a copy at the gap.
+    let mut h = organize(3);
+    h.ctx.set_os(egui::os::OperatingSystem::Mac);
+    let before = page_texts(h.state());
+    let (from, to) = points(&h);
+    page_drag(&mut h, from, to, Modifiers::ALT);
+    assert_eq!(page_texts(h.state()), vec![before[0].clone(), before[1].clone(), before[2].clone(), before[0].clone()], "Option copies on macOS");
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().can_undo(), Some("Duplicate page"));
+    let sel: Vec<usize> = h.state().views[0].selected.iter().copied().collect();
+    assert_eq!(sel, vec![3], "the copy is selected");
+}
+
 #[test]
 fn copying_cutting_and_pasting_pages() {
     let mut h = organize(4);
@@ -3843,6 +3954,58 @@ fn one_editor_contains_mixed_styles_and_visual_rows() {
     assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().text_blocks(0)[0].rows.len(), 3);
 }
 
+#[test]
+fn the_caret_on_a_small_row_is_as_tall_as_that_row() {
+    // It was one row of the region's first (18 pt) size tall, reaching into the row below.
+    let bytes = source_font_fixture_with_text(
+        "BT 0 0.2 0.5 rg /F1 1 Tf 18 0 0 18 20 240 Tm (Heading) Tj ET \
+         BT 0 g /F2 12 Tf 20 215 Td (Plain ) Tj /F1 12 Tf 0 0.2 0.5 rg (bold) Tj /F2 12 Tf 0 g ( words) Tj ET \
+         BT /F2 10 Tf 20 195 Td (Last row) Tj ET",
+    );
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("mixed.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    let page = h.state().views[0].page_screen_rect(0).unwrap();
+    let k = page.width() / 300.0;
+    let screen = |x: f32, y: f32| egui::pos2(page.left() + x * k, page.top() + (300.0 - y) * k);
+    let click = |h: &mut Harness<'static, PdfCraftApp>, at: egui::Pos2| {
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(4);
+    };
+    click(&mut h, screen(30.0, 245.0));
+    assert!(h.state().views[0].line_editor.is_some(), "the region opens");
+    let row = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().find(|l| l.text == "Last row").unwrap().rect;
+    click(&mut h, screen(40.0, ((row[1] + row[3]) / 2.0) as f32));
+    let row_height = (row[3] - row[1]) as f32 * k;
+    let (left, right) = (screen(row[0] as f32, 0.0).x - 2.0, screen(row[2] as f32, 0.0).x + 2.0);
+    let middle = screen(0.0, ((row[1] + row[3]) / 2.0) as f32).y;
+    // The caret: a vertical segment within the row's span, through its middle.
+    let caret = h
+        .output()
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points: [a, b], .. }
+                if (a.x - b.x).abs() < 0.01 && (left..right).contains(&a.x) && a.y.min(b.y) < middle && a.y.max(b.y) > middle =>
+            {
+                Some((b.y - a.y).abs())
+            }
+            _ => None,
+        })
+        .expect("a caret on the last row");
+    assert!(caret > row_height * 0.8 && caret < row_height + 4.0, "caret {caret} px on a {row_height} px row");
+}
+
 /// Opt-in private-document regression. This never captures images or saves the source file.
 /// Run with PDFCRAFT_TEXT_REGRESSION_PDF=/path/to/document.pdf and --ignored.
 #[test]
@@ -4272,9 +4435,25 @@ fn image_pixels_follow_the_frame_while_a_corner_is_dragged() {
             .filter(|b| b.width() < page.width() - 1.0)
             .collect()
     };
+    // The dragged picture is cut from the page raster, which a render thread delivers after
+    // however many frames it takes (more on a slow runner): wait for it on screen, by state.
+    let raster_shown = |h: &Harness<'static, PdfCraftApp>| {
+        h.output().shapes.iter().any(|s| {
+            matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() && m.calc_bounds().width() >= page.width() - 1.0)
+        })
+    };
+    let wait_for_raster = |h: &mut Harness<'static, PdfCraftApp>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while h.state().render_pending() || !raster_shown(h) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the page raster");
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
     let start = frame(&h).expect("the selected image has a frame");
     let (grip, fixed) = (start.right_top(), start.left_bottom());
     for factor in [0.6, 1.3] {
+        wait_for_raster(&mut h);
         let to = fixed + (grip - fixed) * factor;
         h.hover_at(grip);
         h.run_steps(1);
@@ -4732,4 +4911,33 @@ fn os_event_edit_switches_active_tab_to_edit_mode() {
     assert_eq!(h.state().mode, Mode::Edit);
     assert_eq!(h.state().left, LeftPanel::Tool("edit"));
     assert_eq!(h.state().quick_tool, QuickTool::EditText);
+}
+
+/// The Read mode command (not the mode bar) applies a paragraph still open in the editor, as
+/// putting the Edit text tool down does; left open, it would stay drawn in Read mode with no tool.
+#[test]
+fn read_mode_shortcut_applies_the_open_paragraph() {
+    use pdfcraft_ui_egui::{Mode, QuickTool};
+    let mut h = harness(1, |_| {});
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    // The line "Page 1" sits at (20, 150) on a 200 × 300 page, 24 pt.
+    let r = h.state().views[0].page_screen_rect(0).expect("on screen");
+    let at = egui::pos2(r.left() + 40.0 / 200.0 * r.width(), r.top() + (300.0 - 158.0) / 300.0 * r.height());
+    h.hover_at(at);
+    h.run_steps(1);
+    h.drag_at(at);
+    h.run_steps(1);
+    h.drop_at(at);
+    h.run_steps(3);
+    assert!(h.state().views[0].line_editor.is_some(), "the line opens for editing");
+    h.state_mut().views[0].line_editor.as_mut().unwrap().text = "Chapter One".into();
+    h.run_steps(1);
+    h.state_mut().run_command("view.read_mode");
+    h.run_steps(3);
+    let s = h.state();
+    assert_eq!(s.mode, Mode::Read);
+    assert_eq!(s.quick_tool, QuickTool::Select);
+    assert!(s.views[0].line_editor.is_none(), "no editor stays open in Read mode");
+    assert_eq!(s.session.get(s.views[0].id).unwrap().text_lines(0)[0].text, "Chapter One", "the edit is applied");
 }

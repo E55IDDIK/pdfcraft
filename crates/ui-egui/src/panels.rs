@@ -418,17 +418,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         }
         changed |= crate::edit_text_ui::extras_panel(ui, &mut ed.extras);
         if changed {
-            let edit = pdfcraft_engine::Edit::EditTextBlock { page: ed.page, block: ed.block, text: ed.text.clone(), style: ed.style() };
-            if app.apply_edit(edit) {
-                ed.applied();
-                if let Some(doc) = app.session.get(app.views[i].id)
-                    && let Some(block) = doc.text_blocks(ed.page).get(ed.block)
-                {
-                    ed.refresh_source(block, doc.text_lines(ed.page));
-                    ed.fonts = crate::edit_text_ui::install_source_fonts(ui.ctx(), doc, ed.page);
-                }
-            }
-            app.views[i].line_editor = Some(ed);
+            app.apply_line_format(i, ed, Some(ui.ctx()));
         }
         ui.add_space(6.0);
         ui.separator();
@@ -480,6 +470,25 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     }
     ui.add_space(6.0);
     ui.separator();
+}
+
+impl PdfCraftApp {
+    /// Apply the open paragraph's formatting as one change; the paragraph stays open.
+    pub(crate) fn apply_line_format(&mut self, index: usize, mut ed: crate::edit_text_ui::LineEditor, ctx: Option<&egui::Context>) {
+        let edit = pdfcraft_engine::Edit::EditTextBlock { page: ed.page, block: ed.block, text: ed.text.clone(), style: ed.style() };
+        if self.apply_edit(edit) {
+            ed.applied();
+            if let Some(doc) = self.session.get(self.views[index].id)
+                && let Some(block) = doc.text_blocks(ed.page).get(ed.block)
+            {
+                ed.refresh_source(block, doc.text_lines(ed.page));
+                if let Some(ctx) = ctx {
+                    ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page);
+                }
+            }
+        }
+        self.views[index].line_editor = Some(ed);
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────── right panels
@@ -791,6 +800,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if let Some((p, i)) = app.views.get_mut(index).and_then(|v| v.comments.default_request.take()) {
         app.make_comment_default(p, i);
     }
+    if let Some((p, i, open)) = app.views.get_mut(index).and_then(|v| v.comments.attachment_request.take()) {
+        app.comment_attachment_action(id, p, i, open);
+    }
     if let Some((p, i)) = app.views.get_mut(index).and_then(|v| v.comments.props_request.take()) {
         app.open_comment_props(p, i);
     }
@@ -1052,6 +1064,11 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
     {
         delete_pages(view, info.pages.len());
     }
+    // A new current page scrolls its thumbnail into view, as little as it takes (Acrobat), but
+    // not while thumbnails are dragged: then the change counts as seen. A wheel turned or a
+    // scroll bar dragged by the user already wins over a scroll to a place in egui.
+    let follow = view.panel_followed != Some(view.current) && view.panel_drag.is_none();
+    view.panel_followed = Some(view.current);
     let w = (ui.available_width() - 40.0).min(150.0);
     let count = info.pages.len();
     let mut rows: Vec<Rect> = Vec::with_capacity(info.pages.len());
@@ -1096,7 +1113,14 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                 Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { t.border }),
                 egui::StrokeKind::Outside,
             );
-            ui.label(egui::RichText::new(&p.label).font(theme::medium(12.0)).color(if selected || picked { t.accent_text } else { t.text_muted }));
+            let label = ui.label(egui::RichText::new(&p.label).font(theme::medium(12.0)).color(if selected || picked {
+                t.accent_text
+            } else {
+                t.text_muted
+            }));
+            if follow && selected {
+                ui.scroll_to_rect(rect.union(label.rect), None);
+            }
             let resp = theme::hand(resp);
             if resp.clicked() {
                 let m = ui.input(|i| i.modifiers);
@@ -1104,6 +1128,8 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                     view.click_page(i, m, true);
                 } else {
                     view.clear_page_selection(Some(i));
+                    // A page clicked here is in view already: the panel stays put.
+                    view.panel_followed = Some(i);
                     *nav = Some(Nav::Page(i));
                 }
             }

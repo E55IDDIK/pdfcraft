@@ -392,3 +392,67 @@ fn full_save_preserves_unknown_trailer_data() {
     assert_eq!(trailer_note(&back), trailer_note(&doc));
     assert_eq!(back.trailer().get(b"Version"), doc.trailer().get(b"Version"));
 }
+
+/// The `startxref` value at the end of `bytes`.
+fn last_startxref(bytes: &[u8]) -> usize {
+    let at = bytes.windows(9).rposition(|w| w == b"startxref").unwrap();
+    String::from_utf8_lossy(&bytes[at + 9..]).split_whitespace().next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn incremental_saves_of_a_file_with_bytes_before_its_header_count_from_the_header() {
+    // Offsets written before the prefix was added count from `%PDF-`, as in the KillerPDF file
+    // of #2364; the appended section must count the same way as the `/Prev` it points back to.
+    let prefix = vec![b'#'; 128];
+    let as_stream = write_full(&Document::open(Arc::new(fixture())).unwrap(), &SaveOptions::default()).unwrap();
+    for (name, body, marker) in [("table", classic_table(), &b"xref"[..]), ("stream", as_stream, &b" 0 obj"[..])] {
+        let input = [prefix.as_slice(), &body].concat();
+        let mut doc = Document::open(Arc::new(input.clone())).unwrap();
+        assert!(doc.revisions().last().unwrap().header_relative, "{name}");
+        doc.update_dict(ObjRef::new(1, 0), |d| d.set(b"Lang".to_vec(), Object::String(pdfcraft_cos::PdfString::literal(b"en".to_vec())))).unwrap();
+        let saved = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        assert!(saved.starts_with(&input), "{name}");
+
+        let xref = last_startxref(&saved) + prefix.len();
+        let section = saved.get(xref..).unwrap_or_default();
+        assert!(section.windows(marker.len()).position(|w| w == marker).is_some_and(|p| p < 16), "{name}: startxref misses its section");
+        let back = Document::open(Arc::new(saved.clone())).unwrap();
+        assert_eq!(back.revisions().len(), doc.revisions().len() + 1, "{name}");
+        assert!(back.revisions().iter().all(|r| r.header_relative), "{name}: one convention across the chain");
+        let edited = back.get(ObjRef::new(1, 0));
+        assert_eq!(edited.as_dict().unwrap().get(b"Lang").and_then(|o| o.as_string()).map(|s| s.bytes.as_slice()), Some(b"en".as_slice()));
+        assert!(back.xref_entry_is_exact(1), "{name}");
+        assert_qpdf_clean(&saved);
+    }
+}
+
+#[test]
+fn incremental_saves_of_a_file_whose_offsets_count_from_its_first_byte_keep_counting_so() {
+    // The other convention: the same file, but its offsets include the bytes before the header.
+    let prefix = vec![b'#'; 128];
+    let mut input = [prefix.as_slice(), &classic_table()].concat();
+    let xref = input.windows(6).rposition(|w| w == b"\nxref\n").unwrap() + 1;
+    let table: String = String::from_utf8_lossy(&input[xref..])
+        .lines()
+        .map(|line| match line.strip_suffix(" 00000 n ").and_then(|o| o.parse::<usize>().ok()) {
+            Some(o) => format!("{:010} 00000 n \n", o + prefix.len()),
+            None if line.parse::<usize>().is_ok() => format!("{xref}\n"),
+            None => format!("{line}\n"),
+        })
+        .collect();
+    input.truncate(xref);
+    input.extend_from_slice(table.as_bytes());
+
+    let mut doc = Document::open(Arc::new(input.clone())).unwrap();
+    assert!(doc.repair_log().is_empty(), "{:?}", doc.repair_log());
+    assert!(!doc.revisions().last().unwrap().header_relative);
+    doc.update_dict(ObjRef::new(1, 0), |d| d.set(b"Lang".to_vec(), Object::String(pdfcraft_cos::PdfString::literal(b"en".to_vec())))).unwrap();
+    let saved = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    assert!(saved.get(last_startxref(&saved)..).unwrap_or_default().starts_with(b"xref"));
+    let back = Document::open(Arc::new(saved.clone())).unwrap();
+    assert!(back.repair_log().is_empty(), "{:?}", back.repair_log());
+    assert_eq!(back.revisions().len(), 2);
+    assert!(back.xref_entry_is_exact(1));
+    // No qpdf check here: qpdf counts every offset from the header in a file with bytes before
+    // it, so it already reconstructs this input before anything is appended.
+}

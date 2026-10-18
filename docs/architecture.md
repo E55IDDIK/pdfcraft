@@ -49,7 +49,8 @@ The PDF object graph *is* the model (`crates/engine/README.md` §The editing mod
 3. After every edit an incremental write produces the working file (original bytes plus one
    revision); the view is refreshed from those bytes, so what you see is what Save writes.
 4. Saves are incremental and atomic. A full rewrite happens only where it must: redaction, PDF/A
-   conversion, print imposition, a changed password, Save As with garbage collection.
+   conversion, print imposition, a changed password, Save As to another file (garbage-collected,
+   unless the document is signed).
 5. Autosave and crash recovery keep encrypted documents encrypted. Signed documents are protected
    from rewrites.
 

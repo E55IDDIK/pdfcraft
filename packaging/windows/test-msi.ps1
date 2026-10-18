@@ -237,6 +237,35 @@ Assert-Equal $pdfCheckbox[1] 'INSTALLPDFCONTEXTMENU' 'Welcome PDF context-menu p
 if ($pdfCheckbox[2] -notmatch 'Edit with PdfCraft') { throw "Welcome PDF context-menu label: '$($pdfCheckbox[2])'" }
 $pdfChecked = Read-Row 'SELECT `Value` FROM `CheckBox` WHERE `Property` = ''INSTALLPDFCONTEXTMENU''' 1
 Assert-Equal $pdfChecked[0] '1' 'Welcome PDF context-menu value'
+
+# PDF Combine menu: a separate optional component and registry key, with Document selection. The
+# legacy static verb allows up to 15 selected files and launches one intent-tagged request per file.
+$combineKey = 'Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine'
+$combineMenu = Read-Row ('SELECT `Registry`, `Value`, `Component_`, `Root` FROM `Registry` WHERE `Key` = ''' + $combineKey + ''' AND `Name` IS NULL') 4
+Assert-Equal $combineMenu[1] 'Combine files with PdfCraft…' 'PDF Combine context menu label'
+Assert-Equal $combineMenu[2] 'PdfcraftCombineContextMenu' 'PDF Combine context menu component'
+Assert-Equal $combineMenu[3] '2' 'PDF Combine context menu HKLM root'
+foreach ($value in @(@('Icon', '"[#PdfcraftExe]",0'), @('MultiSelectModel', 'Document'))) {
+  $row = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $combineKey + ''' AND `Name` = ''' + $value[0] + '''') 2
+  Assert-Equal $row[0] $value[1] "PDF Combine context menu $($value[0])"
+  Assert-Equal $row[1] 'PdfcraftCombineContextMenu' "PDF Combine context menu $($value[0]) component"
+}
+$combineCommand = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $combineKey + '\command''') 2
+Assert-Equal $combineCommand[0] '"[#PdfcraftExe]" --combine "%1"' 'PDF Combine context menu command'
+Assert-Equal $combineCommand[1] 'PdfcraftCombineContextMenu' 'PDF Combine context menu command component'
+$combineComponent = Read-Row 'SELECT `Condition`, `KeyPath` FROM `Component` WHERE `Component` = ''PdfcraftCombineContextMenu''' 2
+Assert-Equal $combineComponent[0] 'INSTALLCOMBINECONTEXTMENU = 1' 'PDF Combine context menu condition'
+Assert-Equal $combineComponent[1] $combineMenu[0] 'PDF Combine context menu key path'
+Assert-KeptOnUpdate 'INSTALLCOMBINECONTEXTMENU' 'COMBINECONTEXTMENURELEASE' 'EXISTINGCOMBINECONTEXTMENU' 'Combine files with PdfCraft…' 'PdfcraftCombineContextMenu' 'PDF Combine context menu'
+Assert-MenuSearch 'EXISTINGCOMBINECONTEXTMENU' $combineKey 'COMBINECONTEXTMENURELEASE' '0.8.1' 'PDF Combine context menu'
+if (($secure[0] -split ';') -notcontains 'INSTALLCOMBINECONTEXTMENU') { throw "INSTALLCOMBINECONTEXTMENU is not secure: '$($secure[0])'" }
+$combineCheckbox = Read-Row 'SELECT `Type`, `Property`, `Text` FROM `Control` WHERE `Dialog_` = ''InstallWelcome'' AND `Control` = ''CombineContextMenu''' 3
+Assert-Equal $combineCheckbox[0] 'CheckBox' 'Welcome PDF Combine context-menu control'
+Assert-Equal $combineCheckbox[1] 'INSTALLCOMBINECONTEXTMENU' 'Welcome PDF Combine context-menu property'
+if ($combineCheckbox[2] -notmatch 'Combine files with PdfCraft') { throw "Welcome PDF Combine context-menu label: '$($combineCheckbox[2])'" }
+$combineChecked = Read-Row 'SELECT `Value` FROM `CheckBox` WHERE `Property` = ''INSTALLCOMBINECONTEXTMENU''' 1
+Assert-Equal $combineChecked[0] '1' 'Welcome PDF Combine context-menu value'
+
 Assert-NoRow 'SELECT `Registry` FROM `Registry` WHERE `Key` = ''Software\Classes\.pdf'' AND `Name` IS NULL' '.pdf default app'
 
 # Negative sequences are Windows Installer's success/user-exit/failure paths. Only full UI

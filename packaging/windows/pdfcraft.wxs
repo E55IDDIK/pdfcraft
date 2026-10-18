@@ -7,9 +7,9 @@
   Per-machine install into Program Files, a Start Menu shortcut, a desktop shortcut (on by default,
   optional, and an update keeps it only if it is still there), an App Paths entry, PdfCraft registered as a PDF handler (offered under "Open with"
   and in Default apps, never forced as the default), "Edit with PdfCraft" on PDF files'
-  right-click menu and "Create PDF with PdfCraft…" on image files' right-click menu (both on by
-  default, optional, and an update keeps the installed version's choice). Files opened with
-  PdfCraft arrive on its command line.
+  right-click menu, "Combine files with PdfCraft…" on PDF files' right-click menu, and "Create PDF
+  with PdfCraft…" on image files' right-click menu (optional, and updates keep each installed
+  choice). Files opened with PdfCraft arrive on its command line.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
@@ -52,10 +52,11 @@
     </Property>
     <SetProperty Id="INSTALLDESKTOPSHORTCUT" Value="1" After="AppSearch" Sequence="first"
         Condition="NOT INSTALLDESKTOPSHORTCUT AND (NOT WIX_UPGRADE_DETECTED OR EXISTINGDESKTOPSHORTCUT)" />
-    <!-- The File Explorer menus: "Edit with PdfCraft" for PDF files (#682) and "Create PDF with
-         PdfCraft…" for images (#190). Each is on by default for a first install and has a property
-         to leave it out of unattended installs: INSTALLPDFCONTEXTMENU=0 (also a welcome-dialog
-         checkbox) and INSTALLIMAGECONTEXTMENU=0. Secure, like the desktop shortcut's.
+    <!-- The File Explorer menus: "Edit with PdfCraft" (#682), "Combine files with PdfCraft…", and
+         "Create PDF with PdfCraft…" for images (#190). Each is on by default for a first install
+         and has a property to leave it out: INSTALLPDFCONTEXTMENU=0,
+         INSTALLCOMBINECONTEXTMENU=0 (both welcome-dialog checkboxes) and
+         INSTALLIMAGECONTEXTMENU=0. Secure, like the desktop shortcut's.
          An update keeps the installed version's choice (#305) by looking for the menu's registry
          key, the way the desktop shortcut looks for its file: AppSearch runs before the old version
          is removed. Releases from before a menu existed (the PDF one came in 0.7.1, the image one in
@@ -64,6 +65,7 @@
     <Upgrade Id="EA00C367-7270-4C50-9D8B-A7A5C88AD27F">
       <UpgradeVersion Minimum="0.7.1" IncludeMinimum="yes" OnlyDetect="yes" Property="PDFCONTEXTMENURELEASE" />
       <UpgradeVersion Minimum="0.4.0" IncludeMinimum="yes" OnlyDetect="yes" Property="IMAGECONTEXTMENURELEASE" />
+      <UpgradeVersion Minimum="0.8.1" IncludeMinimum="yes" OnlyDetect="yes" Property="COMBINECONTEXTMENURELEASE" />
     </Upgrade>
     <Property Id="INSTALLPDFCONTEXTMENU" Secure="yes" />
     <Property Id="EXISTINGPDFCONTEXTMENU">
@@ -71,6 +73,12 @@
     </Property>
     <SetProperty Id="INSTALLPDFCONTEXTMENU" Value="1" After="AppSearch" Sequence="first"
         Condition="NOT INSTALLPDFCONTEXTMENU AND (NOT PDFCONTEXTMENURELEASE OR EXISTINGPDFCONTEXTMENU)" />
+    <Property Id="INSTALLCOMBINECONTEXTMENU" Secure="yes" />
+    <Property Id="EXISTINGCOMBINECONTEXTMENU">
+      <RegistrySearch Id="CombineContextMenuSearch" Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine" Type="raw" />
+    </Property>
+    <SetProperty Id="INSTALLCOMBINECONTEXTMENU" Value="1" After="AppSearch" Sequence="first"
+        Condition="NOT INSTALLCOMBINECONTEXTMENU AND (NOT COMBINECONTEXTMENURELEASE OR EXISTINGCOMBINECONTEXTMENU)" />
     <Property Id="INSTALLIMAGECONTEXTMENU" Secure="yes" />
     <Property Id="EXISTINGIMAGECONTEXTMENU">
       <RegistrySearch Id="ImageContextMenuSearch" Root="HKLM" Key="Software\Classes\SystemFileAssociations\.png\shell\PdfCraft.CreatePdf" Type="raw" />
@@ -154,6 +162,17 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Edit" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Edit" Name="MultiSelectModel" Value="Document" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Edit\command" Value="&quot;[#PdfcraftExe]&quot; &quot;%1&quot;" Type="string" />
+      </Component>
+
+      <!-- Combine context menu: the legacy Document model starts one launch for each selected
+           PDF (up to 15). The single-instance protocol queues these intent-tagged launches into
+           one Combine tab; the user still reviews and confirms the result. -->
+      <Component Id="PdfcraftCombineContextMenu" Guid="6C55260D-0081-46D1-BABE-0EB04CFD55AF"
+          Condition="INSTALLCOMBINECONTEXTMENU = 1">
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine" Value="Combine files with PdfCraft…" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine" Name="Icon" Value="&quot;[#PdfcraftExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine" Name="MultiSelectModel" Value="Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine\command" Value="&quot;[#PdfcraftExe]&quot; --combine &quot;%1&quot;" Type="string" />
       </Component>
 
       <!-- Image context menu (#190): "Create PDF with PdfCraft…" opens the DPI chooser, without

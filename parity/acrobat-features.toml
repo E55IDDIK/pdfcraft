@@ -131,6 +131,10 @@ status = "partial"
 commands = []
 tools = []
 evidence = []
+# Windows also offers a separate optional PDF Combine context-menu verb; it stages selected files
+# for review. The static Document verb is limited to 15 files, and separately launched items are
+# grouped in arrival order (users can reorder in the Combine tab). Its MSI rows are checked by
+# packaging/windows/test-msi.ps1; keep this feature partial until Windows validation is complete.
 notes = "decoded through the hayro bootstrap for display; own codecs are M1.1/M1.2"
 
 [[feature]]

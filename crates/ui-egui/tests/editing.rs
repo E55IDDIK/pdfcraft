@@ -1071,6 +1071,23 @@ fn combine_files_opens_in_its_own_tab() {
 }
 
 #[test]
+fn external_combine_paths_are_staged_in_received_order_and_focus_the_combine_tab() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-external-combine-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let second = dir.join("z Plan.pdf");
+    let first = dir.join("a résumé.pdf");
+    std::fs::write(&second, fixture(1)).unwrap();
+    std::fs::write(&first, fixture(2)).unwrap();
+    let paths = vec![second.to_string_lossy().into_owned(), first.to_string_lossy().into_owned()];
+    let staged = paths.clone();
+    let h = harness(1, move |app| app.add_paths_to_combine(&staged));
+    assert!(h.state().combine_showing());
+    assert_eq!(h.state().combine_draft.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["z Plan.pdf", "a résumé.pdf"]);
+    drop(h);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn closing_the_combine_tab_forgets_its_list() {
     let mut h = harness(1, |app| {
         app.use_files(pdfcraft_ui_egui::FilePurpose::Combine, vec![("one.pdf".into(), fixture(1))]);

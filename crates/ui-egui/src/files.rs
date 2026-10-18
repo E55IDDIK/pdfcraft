@@ -255,6 +255,13 @@ fn read_named(path: &std::path::Path) -> Result<(String, Vec<u8>), (String, Stri
 }
 
 impl PdfCraftApp {
+    /// Add paths received from a file-manager Combine command to the existing Combine tab.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn add_paths_to_combine(&mut self, paths: &[String]) {
+        let paths = paths.iter().map(|path| std::path::PathBuf::from(path.as_str())).collect::<Vec<_>>();
+        self.use_paths(FilePurpose::Combine, &paths);
+    }
+
     /// Ask for files to add to the Combine files list (its Add files… button).
     pub fn combine_dialog(&mut self) {
         self.pick_files(FilePurpose::Combine, true);

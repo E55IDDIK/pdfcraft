@@ -394,6 +394,8 @@ pub type FailedInbox = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 pub enum OsEvent {
     /// Open these files.
     Open(Vec<String>),
+    /// Stage these files in the Combine tab.
+    Combine(Vec<String>),
     /// Quit (the Dock's Quit, logging out), asking about unsaved changes first.
     Quit,
 }
@@ -3013,6 +3015,13 @@ impl eframe::App for PdfCraftApp {
                 OsEvent::Open(paths) => paths.iter().for_each(|p| self.open_path(p)),
                 #[cfg(target_arch = "wasm32")]
                 OsEvent::Open(_) => {}
+                #[cfg(not(target_arch = "wasm32"))]
+                OsEvent::Combine(paths) => {
+                    self.open_combine_tab();
+                    self.add_paths_to_combine(&paths);
+                }
+                #[cfg(target_arch = "wasm32")]
+                OsEvent::Combine(_) => {}
                 // Like closing the window: `guard_quit` asks about unsaved changes.
                 OsEvent::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }

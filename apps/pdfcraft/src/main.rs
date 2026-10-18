@@ -436,6 +436,7 @@ fn app_creator<'a>(
             );
         }
         if combine {
+            app.set_context(&cc.egui_ctx);
             app.open_combine_tab();
             if !files.is_empty() {
                 app.add_paths_to_combine(&files);

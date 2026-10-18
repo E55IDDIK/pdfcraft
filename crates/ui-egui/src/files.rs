@@ -123,6 +123,15 @@ pub struct FileRequest {
 /// Files picked asynchronously (web), waiting to be used.
 pub type Requests = Arc<std::sync::Mutex<Vec<FileRequest>>>;
 
+/// A job queued for the background Combine file reader.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct CombineJob {
+    pub paths: Vec<std::path::PathBuf>,
+    pub request: FileRequest,
+    pub requests: Requests,
+    pub ctx: Option<egui::Context>,
+}
+
 /// Settings for the Split dialog.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SplitDraft {
@@ -264,6 +273,57 @@ impl PdfCraftApp {
         self.use_paths(FilePurpose::Combine, &paths);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn submit_combine_job(&mut self, mut job: CombineJob) {
+        if let Some(sender) = &self.combine_worker {
+            match sender.send(job) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::SendError(returned)) => {
+                    job = returned;
+                    self.combine_worker = None;
+                }
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<CombineJob>();
+        let spawned = std::thread::Builder::new().name("pdfcraft-combine-read".into()).spawn(move || {
+            while let Ok(job) = rx.recv() {
+                let mut files = Vec::with_capacity(job.paths.len());
+                let mut modified = Vec::with_capacity(job.paths.len());
+                let mut error = None;
+                for path in job.paths {
+                    match read_named(&path) {
+                        Ok(file) => {
+                            modified.push(std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok());
+                            files.push(file);
+                        }
+                        Err(problem) => {
+                            error = Some(problem);
+                            break;
+                        }
+                    }
+                }
+                if let Ok(mut queue) = job.requests.lock() {
+                    queue.push(FileRequest { files, modified, error, ..job.request });
+                    if let Some(ctx) = job.ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
+        match spawned {
+            Ok(_) => {
+                if let Err(e) = tx.send(job) {
+                    self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
+                } else {
+                    self.combine_worker = Some(tx);
+                }
+            }
+            Err(e) => {
+                self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
+            }
+        }
+    }
+
     /// Ask for files to add to the Combine files list (its Add files… button).
     pub fn combine_dialog(&mut self) {
         self.pick_files(FilePurpose::Combine, true);
@@ -343,31 +403,7 @@ impl PdfCraftApp {
             let requests = self.requests.clone();
             let ctx = self.ctx.clone();
             let request = self.file_request(purpose, Vec::new());
-            if let Err(e) = std::thread::Builder::new().name("pdfcraft-combine-read".into()).spawn(move || {
-                let mut files = Vec::with_capacity(paths.len());
-                let mut modified = Vec::with_capacity(paths.len());
-                let mut error = None;
-                for path in paths {
-                    match read_named(&path) {
-                        Ok(file) => {
-                            modified.push(std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok());
-                            files.push(file);
-                        }
-                        Err(problem) => {
-                            error = Some(problem);
-                            break;
-                        }
-                    }
-                }
-                if let Ok(mut queue) = requests.lock() {
-                    queue.push(FileRequest { files, modified, error, ..request });
-                    if let Some(ctx) = ctx {
-                        ctx.request_repaint();
-                    }
-                }
-            }) {
-                self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
-            }
+            self.submit_combine_job(CombineJob { paths, request, requests, ctx });
             return;
         }
         if purpose == FilePurpose::CreateMultiple {

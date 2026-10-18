@@ -1094,6 +1094,30 @@ fn external_combine_paths_are_staged_in_received_order_and_focus_the_combine_tab
 }
 
 #[test]
+fn separate_external_combine_requests_are_staged_in_submission_order() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-combine-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("01_first.pdf");
+    let second = dir.join("02_second.pdf");
+    std::fs::write(&first, fixture(1)).unwrap();
+    std::fs::write(&second, fixture(2)).unwrap();
+    let first_path = vec![first.to_string_lossy().into_owned()];
+    let second_path = vec![second.to_string_lossy().into_owned()];
+    let mut h = harness(1, move |app| {
+        app.add_paths_to_combine(&first_path);
+        app.add_paths_to_combine(&second_path);
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while h.state().combine_draft.len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run_steps(1);
+    }
+    assert_eq!(h.state().combine_draft.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["01_first.pdf", "02_second.pdf"]);
+    drop(h);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn closing_the_combine_tab_forgets_its_list() {
     let mut h = harness(1, |app| {
         app.use_files(pdfcraft_ui_egui::FilePurpose::Combine, vec![("one.pdf".into(), fixture(1))]);

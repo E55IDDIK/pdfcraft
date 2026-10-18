@@ -699,6 +699,9 @@ pub struct PdfCraftApp {
     pub combine_zoom: f32,
     /// The Combine grid's thumbnails: rendered off the UI thread, a few at a time.
     pub(crate) combine_thumbs: combine_grid::Thumbs,
+    /// Channel to a background worker that reads files for the Combine tab sequentially.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) combine_worker: Option<std::sync::mpsc::Sender<files::CombineJob>>,
     /// Images waiting for the resolution choice (released on cancel).
     pub image_import: Option<create_ui::ImageImport>,
     /// The custom stamp library, and the stamp being created.
@@ -1010,6 +1013,8 @@ impl PdfCraftApp {
             combine_view: Default::default(),
             combine_zoom: 1.0,
             combine_thumbs: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            combine_worker: None,
             image_import: None,
             custom_stamps: Vec::new(),
             stamp_draft: Default::default(),
@@ -1773,6 +1778,12 @@ impl PdfCraftApp {
         if let Some(warning) = warning {
             self.notify_tr(warning);
         }
+    }
+
+    /// Sets the egui context for early startup paths (such as staged Combine files)
+    /// so worker callbacks can request a repaint when reads finish.
+    pub fn set_context(&mut self, ctx: &egui::Context) {
+        self.ctx = Some(ctx.clone());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

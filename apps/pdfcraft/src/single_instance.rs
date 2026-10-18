@@ -138,14 +138,15 @@ impl Server {
     }
 }
 
-/// The versioned request a launch sends and a newline.
+/// The request a launch sends and a newline. Open requests use the legacy shape for backwards
+/// compatibility with older running instances; Combine uses the versioned envelope.
 #[cfg_attr(not(any(windows, all(unix, not(target_os = "macos")))), allow(dead_code))]
 pub fn request(intent: Intent, paths: &[String]) -> String {
-    let intent = match intent {
-        Intent::Open => "open",
-        Intent::Combine => "combine",
-    };
-    let mut line = serde_json::json!({ "version": 1, "intent": intent, "paths": paths }).to_string();
+    let mut line = match intent {
+        Intent::Open => serde_json::json!({ "open": paths }),
+        Intent::Combine => serde_json::json!({ "version": 1, "intent": "combine", "paths": paths }),
+    }
+    .to_string();
     line.push('\n');
     line
 }
@@ -393,6 +394,7 @@ mod tests {
         let paths = vec![r"C:\Users\me\Documents\Quote.pdf".to_string(), r"D:\Scans\Plan „A“ 1.pdf".to_string()];
         let line = request(Intent::Open, &paths);
         assert!(line.ends_with('\n') && !line.trim_end().contains('\n'), "one line");
+        assert!(line.contains(r#"{"open":["#) && !line.contains("version"));
         assert_eq!(parse_request(&line), Some(Request { intent: Intent::Open, paths }));
     }
 

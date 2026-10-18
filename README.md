@@ -185,7 +185,7 @@ Unsaved documents carry a dot on their tab, and closing or quitting asks before 
 
 ## Combine and split without losing a thing
 
-**Combine files** merges any number of PDFs into one. Each file gets a bookmark, with its own bookmarks nested underneath.
+**Combine files** merges PDFs into one. In the desktop app, images and text files can be converted first, as can Word and PowerPoint documents on native builds with a supported Office suite installed. Windows uses Microsoft Office; other desktop platforms use LibreOffice. Excel is not supported. Each source gets a bookmark, with its own bookmarks nested underneath.
 
 **Extract** copies the pages you select into a new document. **Split** divides a document every *n* pages, or before the pages you choose.
 
@@ -419,14 +419,14 @@ Logs, environment variables and other development notes are in [docs/development
 
 PdfCraft is young and moving fast. The aim is a workbench where you can view, organize, annotate, fill, sign and edit PDFs, for professional and everyday workflows.
 
-**Where it stands (October 2026), honestly:** PdfCraft is **alpha**. Most essential offline PDF features exist in some form (57% of the features tracked in [docs/target-app-parity.md](docs/target-app-parity.md), 94% of core essentials). For everyday work (viewing, commenting, filling and signing forms, organizing pages) readiness is about 55%; across all professional workflows, about 49%; for someone who only needs the essentials, about 66%. Every everyday workflow can be completed, but converting and sharing is weak: no office-document-to-PDF, and .docx export that loses layout.
+**Where it stands (October 2026), honestly:** PdfCraft is **alpha**. Most essential offline PDF features exist in some form (57% of the features tracked in [docs/target-app-parity.md](docs/target-app-parity.md), 94% of core essentials). For everyday work (viewing, commenting, filling and signing forms, organizing pages) readiness is about 55%; across all professional workflows, about 49%; for someone who only needs the essentials, about 66%. Everyday workflows are usable, but converting and sharing remain weak: Word and PowerPoint can be converted to PDF through supported desktop paths, while CLI/MCP coverage is incomplete and .docx export can lose layout.
 
-- **Good today:** viewing and search; organizing, combining and splitting; most kinds of comment; filling and authoring forms (with sandboxed JavaScript); passwords, redaction and sanitizing; basic digital signatures; printing; the Accessibility Checker; agent control through the CLI and MCP.
+- **Good today:** viewing and search; organizing, combining and splitting; most kinds of comment; filling and authoring forms (with sandboxed JavaScript); passwords, redaction and sanitizing; basic digital signatures; printing; the Accessibility Checker; limited Word/PowerPoint-to-PDF conversion in desktop workflows; agent control through the CLI and MCP.
 - **Still borrowed:** pages are drawn by the `hayro` crate while our own renderer is built.
-- **Thin or missing:** reliable editing of existing text (especially CJK and right-to-left), OCR beyond Latin script, office document import/export, signature tokens and online long-term validation, Preflight and PDF/X/UA, printing from the web build, physical printer fidelity, and full XFA forms.
+- **Thin or missing:** reliable editing of existing text (especially CJK and right-to-left), OCR beyond Latin script, consistent Office-to-PDF coverage across entry points and Office export fidelity, signature tokens and online long-term validation, Preflight and PDF/X/UA, printing from the web build, physical printer fidelity, and full XFA forms.
 - **Hardening:** fuzzing still turns up crashes and hangs on hostile files; each one is fixed with a regression test. Quality has not yet been benchmarked side by side.
 
-**Next, in order:** office-document-to-PDF and a .docx export that keeps layout, the reported bugs and the Chinese interface font, a fidelity harness against a reference renderer, editing existing content, then professional workflows (OCR, office formats, Preflight, signatures, accessibility tagging) and 1.0 polish.
+**Next, in order:** complete Office-to-PDF coverage and improve .docx export layout, the reported bugs and the Chinese interface font, a fidelity harness against a reference renderer, editing existing content, then professional workflows (OCR, broader Office formats, Preflight, signatures, accessibility tagging) and 1.0 polish.
 
 The summary is in **[ROADMAP.md](ROADMAP.md)**; the full assessment by dimension and area is in [docs/target-app-parity.md](docs/target-app-parity.md), the ranked gaps in [docs/gaps.md](docs/gaps.md), and the milestones in [docs/roadmap.md](docs/roadmap.md).
 
@@ -452,11 +452,19 @@ The portable zip runs from any folder, a USB stick included. Its `portable.txt` 
 logs and crash recovery in a `PdfCraftData` folder next to `pdfcraft.exe`, so nothing is written to
 `%APPDATA%`; delete that file to use the normal per-user folders.
 
-The MSI installs for all users and requires administrator privileges. It adds "Edit with PdfCraft"
-to the right-click menu of PDF files and "Create PDF with PdfCraft…" to the right-click menu of
-images (.png .jpg .jpeg .tif .tiff .gif .bmp .jp2 .j2k .jpx) in File Explorer (on Windows 11, under
-"Show more options"), without changing which app opens them by default. For unattended deployment
-without a desktop shortcut, run from an elevated terminal:
+The MSI installs for all users and requires administrator privileges. It adds these File Explorer
+right-click actions (on Windows 11, under "Show more options"), without changing which app opens
+your files by default:
+
+- **Edit with PdfCraft** for PDFs.
+- **Combine files with PdfCraft…** for PDFs, supported images (.png .jpg .jpeg .tif .tiff .gif
+  .bmp .jp2 .j2k .jpx), and Word/PowerPoint files (.doc .docx .ppt .pptx). Select up to 15 files;
+  the Combine tab lets you review and reorder them.
+- **Create PDF with PdfCraft…** for one supported image or Word/PowerPoint file at a time. On
+  Windows, Office conversion requires Microsoft Office with the corresponding Word or PowerPoint
+  desktop app installed.
+
+For unattended deployment without a desktop shortcut, run from an elevated terminal:
 
 ```powershell
 msiexec /i "pdfcraft-<ver>-windows-x64.msi" /qn /norestart INSTALLDESKTOPSHORTCUT=0
@@ -466,15 +474,16 @@ msiexec /i "pdfcraft-<ver>-windows-x64.msi" /qn /norestart INSTALLDESKTOPSHORTCU
 |---|---|
 | `INSTALLDESKTOPSHORTCUT` | the all-users desktop shortcut |
 | `INSTALLPDFCONTEXTMENU` | "Edit with PdfCraft" on PDF files |
-| `INSTALLIMAGECONTEXTMENU` | "Create PDF with PdfCraft…" on images |
+| `INSTALLCOMBINECONTEXTMENU` | "Combine files with PdfCraft…" on supported files |
+| `INSTALLIMAGECONTEXTMENU` | "Create PDF with PdfCraft…" on images and Office files |
 
-All three are on for a first install. An upgrade keeps what the installed version has: a shortcut
-or menu entry that is there stays, and one that is missing (left out at install, or a desktop
-shortcut someone deleted) stays missing, so you don't need to pass them again. A value on the
+All four options are on by default for a first install. An upgrade keeps what the installed version
+has: an existing shortcut or menu entry stays, and one that is missing (left out at install, or a
+desktop shortcut someone deleted) stays missing, so you don't need to pass them again. A value on the
 command line always wins: `=1` puts one back and `=0` removes it. Upgrading from a release that
-didn't have a menu yet (0.6.0 and earlier for the PDF menu, 0.2.1 and earlier for the image menu)
-adds it, as a first install would. Use the MSI for your architecture. Per-user installation
-overrides are not supported.
+didn't have a menu yet (before 0.7.1 for the PDF menu, 0.8.1 for Combine, or 0.4.0 for the image
+and Office Create PDF menu) adds it, as a first install would. Use the MSI for your architecture.
+Per-user installation overrides are not supported.
 
 **Pin the checksum, not just the version.** Release candidates of a version share its MSI version
 (MSI versions are numbers only, so 1.2.3-rc.1 and 1.2.3 are both 1.2.3), and the installer lets an

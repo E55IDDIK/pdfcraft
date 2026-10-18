@@ -49,6 +49,7 @@ const MAX_PENDING_REQUESTS: usize = 64;
 #[cfg_attr(not(any(windows, all(unix, not(target_os = "macos")))), allow(dead_code))]
 pub enum Intent {
     Open,
+    Edit,
     Combine,
 }
 
@@ -131,6 +132,7 @@ impl Server {
                 .into_iter()
                 .map(|request| match request.intent {
                     Intent::Open => OsEvent::Open(request.paths),
+                    Intent::Edit => OsEvent::Edit(request.paths),
                     Intent::Combine => OsEvent::Combine(request.paths),
                 })
                 .collect()
@@ -144,6 +146,7 @@ impl Server {
 pub fn request(intent: Intent, paths: &[String]) -> String {
     let mut line = match intent {
         Intent::Open => serde_json::json!({ "open": paths }),
+        Intent::Edit => serde_json::json!({ "version": 1, "intent": "edit", "paths": paths }),
         Intent::Combine => serde_json::json!({ "version": 1, "intent": "combine", "paths": paths }),
     }
     .to_string();
@@ -164,6 +167,7 @@ pub fn parse_request(line: &str) -> Option<Request> {
         }
         let intent = match value.get("intent")?.as_str()? {
             "open" => Intent::Open,
+            "edit" => Intent::Edit,
             "combine" => Intent::Combine,
             _ => return None,
         };
@@ -464,8 +468,13 @@ mod tests {
         let server = Server::new();
         assert!(server.deliver(Request { intent: Intent::Combine, paths: vec!["a.pdf".into(), "b.pdf".into()] }));
         assert!(server.deliver(Request { intent: Intent::Open, paths: vec!["c.pdf".into()] }));
+        assert!(server.deliver(Request { intent: Intent::Edit, paths: vec!["d.pdf".into()] }));
         let mut poll = server.connect(&egui::Context::default(), false);
-        assert!(matches!(poll().as_slice(), [OsEvent::Combine(c), OsEvent::Open(o)] if c == &["a.pdf", "b.pdf"] && o == &["c.pdf"]));
+        assert!(matches!(
+            poll().as_slice(),
+            [OsEvent::Combine(c), OsEvent::Open(o), OsEvent::Edit(e)]
+                if c == &["a.pdf", "b.pdf"] && o == &["c.pdf"] && e == &["d.pdf"]
+        ));
     }
 
     #[test]

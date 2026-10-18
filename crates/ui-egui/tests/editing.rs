@@ -4720,3 +4720,16 @@ fn leaving_organize_goes_back_to_the_workspace_panel() {
     h.run_steps(3);
     assert_eq!(h.state().left, LeftPanel::AllTools);
 }
+
+#[test]
+fn os_event_edit_switches_active_tab_to_edit_mode() {
+    use pdfcraft_ui_egui::{LeftPanel, Mode, OsEvent, QuickTool};
+    let mut h = harness(1, |_| {});
+    let queue = std::rc::Rc::new(std::cell::RefCell::new(vec![OsEvent::Edit(vec![])]));
+    let q = std::rc::Rc::clone(&queue);
+    h.state_mut().os_events = Some(Box::new(move || q.borrow_mut().drain(..).collect()));
+    h.run_steps(4);
+    assert_eq!(h.state().mode, Mode::Edit);
+    assert_eq!(h.state().left, LeftPanel::Tool("edit"));
+    assert_eq!(h.state().quick_tool, QuickTool::EditText);
+}

@@ -394,6 +394,8 @@ pub type FailedInbox = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 pub enum OsEvent {
     /// Open these files.
     Open(Vec<String>),
+    /// Open these files in Edit mode.
+    Edit(Vec<String>),
     /// Stage these files in the Combine tab.
     Combine(Vec<String>),
     /// Quit (the Dock's Quit, logging out), asking about unsaved changes first.
@@ -1356,7 +1358,13 @@ impl PdfCraftApp {
         }
         if activate && let Some(mode) = self.mode_override {
             // Explicit mode options do not reset independent --tool / --left choices.
-            self.mode = mode;
+            let left_open = self.left_open;
+            let left = self.left;
+            self.select_mode(mode);
+            if left != LeftPanel::AllTools {
+                self.left = left;
+            }
+            self.left_open = left_open;
         } else if activate && self.mode != self.default_mode {
             // Switch workspace like the mode bar, but a left panel the user (or `--left closed`)
             // closed stays closed, and an unchanged mode keeps the tool panel the user chose.
@@ -2183,7 +2191,7 @@ impl PdfCraftApp {
     /// Switches workspace because the user chose to (mode bar, Read mode command). Entering Read
     /// mode closes the right panel, as Acrobat's Read mode hides its panes, and leaving it reopens
     /// that panel. The rail stays in Read mode, and its buttons open panels there too (#932).
-    pub(crate) fn switch_mode(&mut self, mode: Mode, select_tools: bool) {
+    pub fn switch_mode(&mut self, mode: Mode, select_tools: bool) {
         let was_read = self.mode == Mode::Read;
         if select_tools {
             self.select_mode(mode);
@@ -2508,7 +2516,13 @@ impl PdfCraftApp {
             ("mode", _) => {
                 let mode = Mode::parse(value).unwrap_or(Mode::AllTools);
                 self.mode_override = Some(mode);
-                self.mode = mode;
+                let left = self.left;
+                let left_open = self.left_open;
+                self.switch_mode(mode, true);
+                if left != LeftPanel::AllTools {
+                    self.left = left;
+                }
+                self.left_open = left_open;
             }
             ("default-mode", _) => {
                 self.default_mode = Mode::parse(value).ok_or("default-mode must be all, read, edit, convert or sign")?;
@@ -2779,6 +2793,11 @@ impl PdfCraftApp {
         Ok(())
     }
 
+    /// Override default mode when opening documents from intent-tagged launches (e.g. --edit).
+    pub fn set_mode_override(&mut self, mode: Mode) {
+        self.mode_override = Some(mode);
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::Key;
         // "Save changes?" is modal: its keys are its own (⌘D is Don't save there, not Document
@@ -3026,6 +3045,14 @@ impl eframe::App for PdfCraftApp {
                 OsEvent::Open(paths) => paths.iter().for_each(|p| self.open_path(p)),
                 #[cfg(target_arch = "wasm32")]
                 OsEvent::Open(_) => {}
+                #[cfg(not(target_arch = "wasm32"))]
+                OsEvent::Edit(paths) => {
+                    self.set_mode_override(Mode::Edit);
+                    paths.iter().for_each(|p| self.open_path(p));
+                    self.switch_mode(Mode::Edit, true);
+                }
+                #[cfg(target_arch = "wasm32")]
+                OsEvent::Edit(_) => {}
                 #[cfg(not(target_arch = "wasm32"))]
                 OsEvent::Combine(paths) => {
                     self.open_combine_tab();

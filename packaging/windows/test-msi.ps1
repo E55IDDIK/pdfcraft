@@ -223,7 +223,7 @@ foreach ($value in @(@('Icon', '"[#PdfcraftExe]",0'), @('MultiSelectModel', 'Doc
   Assert-Equal $row[1] 'PdfcraftPdfContextMenu' "PDF context menu $($value[0]) component"
 }
 $pdfCommand = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $pdfKey + '\command''') 2
-Assert-Equal $pdfCommand[0] '"[#PdfcraftExe]" "%1"' 'PDF context menu command'
+Assert-Equal $pdfCommand[0] '"[#PdfcraftExe]" --edit "%1"' 'PDF context menu command'
 Assert-Equal $pdfCommand[1] 'PdfcraftPdfContextMenu' 'PDF context menu command component'
 $pdfComponent = Read-Row 'SELECT `Condition`, `KeyPath` FROM `Component` WHERE `Component` = ''PdfcraftPdfContextMenu''' 2
 Assert-Equal $pdfComponent[0] 'INSTALLPDFCONTEXTMENU = 1' 'PDF context menu condition'
@@ -238,7 +238,7 @@ if ($pdfCheckbox[2] -notmatch 'Edit with PdfCraft') { throw "Welcome PDF context
 $pdfChecked = Read-Row 'SELECT `Value` FROM `CheckBox` WHERE `Property` = ''INSTALLPDFCONTEXTMENU''' 1
 Assert-Equal $pdfChecked[0] '1' 'Welcome PDF context-menu value'
 
-# PDF Combine menu: a separate optional component and registry key, with Document selection. The
+# Combine menu: a separate optional component and registry key, with Document selection. The
 # legacy static verb allows up to 15 selected files and launches one intent-tagged request per file.
 $combineKey = 'Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Combine'
 $combineMenu = Read-Row ('SELECT `Registry`, `Value`, `Component_`, `Root` FROM `Registry` WHERE `Key` = ''' + $combineKey + ''' AND `Name` IS NULL') 4
@@ -253,6 +253,18 @@ foreach ($value in @(@('Icon', '"[#PdfcraftExe]",0'), @('MultiSelectModel', 'Doc
 $combineCommand = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $combineKey + '\command''') 2
 Assert-Equal $combineCommand[0] '"[#PdfcraftExe]" --combine "%1"' 'PDF Combine context menu command'
 Assert-Equal $combineCommand[1] 'PdfcraftCombineContextMenu' 'PDF Combine context menu command component'
+foreach ($ext in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'jp2', 'j2k', 'jpx')) {
+  $imgCombineKey = 'Software\Classes\SystemFileAssociations\.' + $ext + '\shell\PdfCraft.Combine'
+  $imgCombineMenu = Read-Row ('SELECT `Value`, `Component_`, `Root` FROM `Registry` WHERE `Key` = ''' + $imgCombineKey + ''' AND `Name` IS NULL') 3
+  Assert-Equal $imgCombineMenu[0] 'Combine files with PdfCraft…' "$ext Combine context menu label"
+  Assert-Equal $imgCombineMenu[1] 'PdfcraftCombineContextMenu' "$ext Combine context menu component"
+  $imgCommand = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $imgCombineKey + '\command''') 2
+  Assert-Equal $imgCommand[0] '"[#PdfcraftExe]" --combine "%1"' "$ext Combine context menu command"
+  Assert-Equal $imgCommand[1] 'PdfcraftCombineContextMenu' "$ext Combine context menu command component"
+  $imgSelection = Read-Row ('SELECT `Value`, `Component_` FROM `Registry` WHERE `Key` = ''' + $imgCombineKey + ''' AND `Name` = ''MultiSelectModel''') 2
+  Assert-Equal $imgSelection[0] 'Document' "$ext Combine context menu selection"
+  Assert-Equal $imgSelection[1] 'PdfcraftCombineContextMenu' "$ext Combine context menu selection component"
+}
 $combineComponent = Read-Row 'SELECT `Condition`, `KeyPath` FROM `Component` WHERE `Component` = ''PdfcraftCombineContextMenu''' 2
 Assert-Equal $combineComponent[0] 'INSTALLCOMBINECONTEXTMENU = 1' 'PDF Combine context menu condition'
 Assert-Equal $combineComponent[1] $combineMenu[0] 'PDF Combine context menu key path'

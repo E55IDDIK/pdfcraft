@@ -3,6 +3,7 @@
 //! Usage: `pdfcraft [options] [files…]`
 //! `--create-images [images…]` stages the images in one PDF and asks for the page DPI.
 //! `--combine [files…]` stages the files in the Combine tab for review before merging.
+//! `--edit [files…]` opens the files in the Edit workspace.
 //!
 //! View options (applied after the files open; also the seed of the UI control channel):
 //! `--page N  --zoom 150  --layout single|continuous|two-up|two-page  --continuous on|off  --panel comments|bookmarks|pages|fields|layers|attachments|none
@@ -193,6 +194,7 @@ fn main() -> eframe::Result {
     let mut control_file: Option<String> = None;
     let mut create_images = false;
     let mut combine = false;
+    let mut edit = false;
     let mut new_window = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -204,6 +206,7 @@ fn main() -> eframe::Result {
             "--control" => control_file = args.next(),
             "--create-images" => create_images = true,
             "--combine" => combine = true,
+            "--edit" => edit = true,
             "--new-window" => new_window = true,
             flag if flag.starts_with("--") => {
                 let value = args.next().unwrap_or_default();
@@ -231,7 +234,13 @@ fn main() -> eframe::Result {
     }
     // Windows, Linux and the BSDs: ordinary file-open launches and explicit Combine launches hand
     // their intent and paths to the running app. Other options and --new-window keep their own UI.
-    let intent = if combine { single_instance::Intent::Combine } else { single_instance::Intent::Open };
+    let intent = if combine {
+        single_instance::Intent::Combine
+    } else if edit {
+        single_instance::Intent::Edit
+    } else {
+        single_instance::Intent::Open
+    };
     let may_hand_off = !new_window && !files.is_empty() && options.is_empty() && control_file.is_none() && !create_images;
     // Absolute for this instance too: links relative to a document resolve against its folder,
     // never the working directory.
@@ -242,7 +251,7 @@ fn main() -> eframe::Result {
         single_instance::Claim::Alone => None,
     };
     let choice = renderer_choice(std::env::var("PDFCRAFT_RENDERER").ok().as_deref());
-    let launch = Launch { files, options, control_file, create_images, combine, integrated, window_controls };
+    let launch = Launch { files, options, control_file, create_images, combine, edit, integrated, window_controls };
     // Finder, Open With and the Dock deliver files as Apple events, not arguments; catch the one
     // that launched us as well as later ones. Lives until the event loop returns.
     #[cfg(target_os = "macos")]
@@ -347,6 +356,7 @@ struct Launch {
     control_file: Option<String>,
     create_images: bool,
     combine: bool,
+    edit: bool,
     integrated: bool,
     /// The window buttons the app draws, when the desktop leaves the frame to it.
     window_controls: Option<pdfcraft_ui_egui::window_controls::Layout>,
@@ -370,7 +380,7 @@ fn app_creator<'a>(
     instance: Option<&'a single_instance::Server>,
     #[cfg(target_os = "macos")] apple_events: &'a apple_events::AppleEvents,
 ) -> eframe::AppCreator<'a> {
-    let Launch { files, options, control_file, create_images, combine, integrated, window_controls } = launch;
+    let Launch { files, options, control_file, create_images, combine, edit, integrated, window_controls } = launch;
     Box::new(move |cc| {
         started.set(true);
         let mut app = PdfCraftApp::new();
@@ -446,11 +456,17 @@ fn app_creator<'a>(
                 app.notify(e);
             }
         } else {
+            if edit {
+                app.set_mode_override(pdfcraft_ui_egui::Mode::Edit);
+            }
             // With the preference on, last session's files come back first; files named on
             // the command line open after them, in front (#442).
             app.reopen_last_files(&files);
             for f in files {
                 app.open_path(&f);
+            }
+            if edit {
+                app.switch_mode(pdfcraft_ui_egui::Mode::Edit, true);
             }
         }
         for (k, v) in options {

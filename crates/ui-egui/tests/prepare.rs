@@ -251,6 +251,59 @@ fn options_tab_sets_the_check_box_style() {
 }
 
 #[test]
+fn button_label_is_editable_without_renaming_the_field() {
+    use pdfcraft_engine::{Edit, NewField};
+    let mut h = harness();
+    h.state_mut().apply_edit(Edit::AddField {
+        page: 0,
+        rect: [40.0, 300.0, 190.0, 330.0],
+        kind: NewField::Button { caption: String::new() },
+        name: Some("clear_button".into()),
+    });
+    h.state_mut().open_field_props("clear_button", 0);
+    h.run_steps(2);
+    h.get_by_label("Options").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Label").click();
+    h.run_steps(1);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Label").type_text("Clear Form");
+    h.run_steps(2);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+
+    let app = h.state();
+    let id = app.views[0].id;
+    let field = app.session.get(id).unwrap().form.iter().find(|f| f.name == "clear_button").unwrap();
+    let bytes = app.session.save_bytes(id).unwrap();
+    let doc = pdfcraft_cos::Document::open(bytes).unwrap();
+    let widget = doc.get(field.widgets[0].obj);
+    let mk = doc.resolve(widget.as_dict().unwrap().get(b"MK").unwrap());
+    assert_eq!(doc.resolve(mk.as_dict().unwrap().get(b"CA").unwrap()).as_string().unwrap().to_text(), "Clear Form");
+    assert_eq!(app.session.get(id).unwrap().can_undo(), Some("Change field properties"));
+
+    // Read the existing label back, and leave both Cancel and an unchanged OK harmless.
+    let before = app.session.save_bytes(id).unwrap();
+    h.state_mut().open_field_props("clear_button", 0);
+    h.run_steps(2);
+    h.get_by_label("Options").click();
+    h.run_steps(2);
+    assert_eq!(h.state().field_props.as_ref().unwrap().caption, "Clear Form");
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Label").click();
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Label").type_text("Discard this");
+    h.run_steps(2);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.save_bytes(id).unwrap(), before);
+    h.state_mut().open_field_props("clear_button", 0);
+    h.run_steps(2);
+    h.get_by_label("OK").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.save_bytes(id).unwrap(), before);
+}
+
+#[test]
 fn dropdown_alignment_is_editable_and_preserved() {
     choice_alignment(pdfcraft_engine::NewField::Combo { options: vec!["One".into(), "Two".into()], editable: false }, "Center", 1);
 }

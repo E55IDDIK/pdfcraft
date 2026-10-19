@@ -64,6 +64,20 @@ semantics; they never silently act on partial text.
 
 ## Shared field properties
 
+For an individual push button, `form_set_props` also edits its visible normal label:
+
+```json
+{"doc": 1, "field": "clear_button", "caption": "Clear Form", "widget": 1}
+```
+
+`widget` is a 1-based index (default 1), used only with `caption`; an empty caption clears the
+label. Neither renames the field. `form_fields` returns the first widget's `caption` and all
+`captions` as `[{"widget": 1, "caption": "Clear Form"}]`. Other widgets and icon-only layouts
+keep their settings. CLI and MCP use the same edit, including undo/redo and save/reopen.
+The desktop exposes it as **Button Properties → Options → Label**. Rollover/down labels and
+icon layout are not edited here; the existing caption font and unsupported-character warning
+policy apply.
+
 `form_set_props` accepts either `field` (one name) or `fields` (1–1000 unique names):
 
 ```json
@@ -75,7 +89,7 @@ The batch is atomic and creates one undo step. A missing or locked field, invali
 unknown argument or malformed appearance refuses the whole edit. Set `locked: false` to
 unlock and change fields together. Only supplied properties change: each field/widget keeps
 its other colours, fonts, values and unknown PDF dictionary keys. `"none"` removes a border
-or fill colour. Names, rectangles and rotations require the single-field form. Results keep
+or fill colour. Names, rectangles, rotations and captions require the single-field form. Results keep
 `field` for single edits and return `fields` for batches. CLI and MCP use the same tool.
 
 ## MCP server

@@ -202,6 +202,8 @@ fn esc(s: &str) -> String {
             '\n' => o.push_str("&#10;"),
             '\r' => o.push_str("&#13;"),
             c if (c as u32) < 0x20 && c != '\n' && c != '\t' => {}
+            // XML 1.0 noncharacters are not allowed even as raw text.
+            '\u{FFFE}' | '\u{FFFF}' => {}
             c => o.push(c),
         }
     }

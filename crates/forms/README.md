@@ -56,6 +56,13 @@ delete_field(&mut doc, "email")?;
   Button1, Date1, Signature1; `/Helv` is added to `/DR`; appearances are drawn at once. Radio
   buttons joining a group become kid widgets with their own export state. Renaming changes only
   the last part of a dotted name.
+- `Widget::caption` reads a push button's normal label (`/MK /CA`, including indirect values).
+  `FieldProps { caption: Some((widget_index, text)), ..Default::default() }` changes or clears
+  that label, independently of the field name. The index is 0-based. A label-only edit redraws
+  just that widget, copying shared/indirect `/MK` and appearance dictionaries before editing.
+  Other widgets, actions, icons, rotation and unknown entries are preserved. Existing icon-only
+  layouts keep hiding the caption; caption rendering retains the existing Helvetica/WinAnsi
+  limits and reports unavailable characters as above.
 
 ## Not yet
 

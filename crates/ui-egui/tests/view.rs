@@ -392,10 +392,78 @@ fn precise_touchpad_wheel_scrolls_one_to_one() {
     assert!(drift.abs() < 2.0, "no easing tail after the swipe: drifted {drift}");
 }
 
+#[test]
+fn rapid_wheel_notches_accelerate_and_follow_touchpad_input() {
+    use pdfcraft_ui_egui::scroll_speed::ScrollSpeed;
+
+    let mut h = harness_stepping(1.0 / 60.0, &[("layout", "continuous"), ("zoom", "300")]);
+    h.state_mut().set_option("animation_effects", "off").unwrap();
+    let at = h.state().views[0].viewport_rect().center();
+    h.hover_at(at);
+    h.run_steps(2);
+
+    h.event(wheel(MouseWheelUnit::Line, -1.0, TouchPhase::Move));
+    let single = scroll_over(&mut h, 2);
+    let base = ScrollSpeed::default().line_points();
+    assert!((single - base).abs() < 1.0, "one notch keeps the configured base: moved {single}, base {base}");
+
+    // Let the isolated notch expire, then spin five notches one frame apart. The burst must move
+    // farther than five base steps without adding work on idle frames.
+    h.run_steps(30);
+    let mut burst = 0.0;
+    for _ in 0..5 {
+        h.event(wheel(MouseWheelUnit::Line, -1.0, TouchPhase::Move));
+        burst += scroll_over(&mut h, 2);
+    }
+    assert!(burst > 7.0 * base, "a rapid five-notch spin accelerates: moved {burst}, base {base}");
+
+    // A line notch inside the precise path's suppression window keeps its base share (#1072):
+    // suppressing egui's touchpad tail must not swallow mixed-device input.
+    h.run_steps(30);
+    h.event(wheel(MouseWheelUnit::Point, -20.0, TouchPhase::Move));
+    scroll_over(&mut h, 2);
+    // Arrive near the old suppression deadline: the line's new easing tail must extend it.
+    h.run_steps(11);
+    h.event(wheel(MouseWheelUnit::Line, -1.0, TouchPhase::Move));
+    let after_touchpad = scroll_over(&mut h, 2);
+    assert!(after_touchpad >= base, "a notch after point input is not dropped: moved {after_touchpad}, base {base}");
+    let delayed = scroll_over(&mut h, 20);
+    assert!(delayed.abs() < 2.0, "the reconstructed notch has no delayed easing copy: moved {delayed}");
+
+    h.event(wheel(MouseWheelUnit::Point, -20.0, TouchPhase::Move));
+    scroll_over(&mut h, 2);
+    h.event(wheel(MouseWheelUnit::Page, -1.0, TouchPhase::Move));
+    let page_after_touchpad = scroll_over(&mut h, 2);
+    assert!(page_after_touchpad > base, "a page event after point input is preserved: moved {page_after_touchpad}");
+    let delayed_page = scroll_over(&mut h, 20);
+    assert!(delayed_page.abs() < 2.0, "the reconstructed page has no delayed easing copy: moved {delayed_page}");
+}
+
+#[test]
+fn changing_continuous_layout_resets_wheel_acceleration() {
+    use pdfcraft_ui_egui::scroll_speed::ScrollSpeed;
+
+    let mut h = harness_stepping(1.0 / 60.0, &[("layout", "continuous"), ("zoom", "300")]);
+    h.state_mut().set_option("animation_effects", "off").unwrap();
+    let at = h.state().views[0].viewport_rect().center();
+    h.hover_at(at);
+    h.run_steps(2);
+    for _ in 0..5 {
+        h.event(wheel(MouseWheelUnit::Line, -1.0, TouchPhase::Move));
+        scroll_over(&mut h, 2);
+    }
+
+    h.state_mut().views[0].set_continuous(false);
+    h.run_steps(3);
+    h.event(wheel(MouseWheelUnit::Line, -1.0, TouchPhase::Move));
+    let moved = scroll_over(&mut h, 2);
+    let base = ScrollSpeed::default().line_points();
+    assert!((moved - base).abs() < 1.0, "a layout jump clears the old burst: moved {moved}, base {base}");
+}
+
 /// Steps `frames` frames and returns how far the document scrolled down over them, from the
 /// pages on screen in each pair of consecutive frames (a page can leave the screen on the way).
-/// Only the non-macOS glide tests below use it, hence the matching gate.
-#[cfg(not(target_os = "macos"))]
+/// Used by wheel and non-macOS glide tests below.
 fn scroll_over(h: &mut Harness<'static, PdfCraftApp>, frames: usize) -> f32 {
     let tops = |h: &Harness<'static, PdfCraftApp>| (0..3).map(|p| rect(h, p).map(|r| r.min.y)).collect::<Vec<_>>();
     let mut moved = 0.0;

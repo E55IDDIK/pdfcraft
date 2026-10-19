@@ -709,6 +709,8 @@ pub struct PdfCraftApp {
     /// Channel to a background worker that reads and prepares imported files sequentially.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) file_import_worker: Option<std::sync::mpsc::Sender<files::FileJob>>,
+    pub(crate) file_import_name: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub open_showing_progress: bool,
     /// Images waiting for the resolution choice (released on cancel).
     pub image_import: Option<create_ui::ImageImport>,
     /// The custom stamp library, and the stamp being created.
@@ -1025,6 +1027,8 @@ impl PdfCraftApp {
             combine_thumbs: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             file_import_worker: None,
+            file_import_name: Default::default(),
+            open_showing_progress: false,
             image_import: None,
             custom_stamps: Vec::new(),
             stamp_draft: Default::default(),
@@ -1242,6 +1246,26 @@ impl PdfCraftApp {
         // earlier waiting replies, without consuming a blocked receiver's result.
         waiting.append(&mut self.pending_opens);
         self.pending_opens = waiting;
+
+        let active_import_name = self.file_import_name.lock().ok().and_then(|s| s.clone());
+        let active_name = self.pending_opens.first().map(|p| p.name.as_str()).or(active_import_name.as_deref());
+
+        if let Some(name) = active_name {
+            if self.progress_notice.is_none() || self.open_showing_progress {
+                let label = if pdfcraft_platform::is_office_document(name) {
+                    crate::i18n::fmt(tl!("Converting {name}…"), &[("name", name)])
+                } else {
+                    crate::i18n::fmt(tl!("Opening {name}…"), &[("name", name)])
+                };
+                self.progress_notice = Some(crate::widgets::ProgressNotice { label, fraction: 0.5, cancellable: false });
+                self.open_showing_progress = true;
+                if let Some(ctx) = &self.ctx {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+        } else if std::mem::take(&mut self.open_showing_progress) {
+            self.progress_notice = None;
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

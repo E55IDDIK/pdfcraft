@@ -161,10 +161,12 @@ mod windows_office {
         let hidden = w::Variant::Bool(false);
         let no_alerts = w::Variant::I4(0);
         let no_macros = w::Variant::I4(3);
+        let dont_save = w::Variant::I4(0); // wdDoNotSaveChanges
+        let _ = app.invoke_put("Visible", &hidden);
+        let _ = app.invoke_put("DisplayAlerts", &no_alerts);
+        let _ = app.invoke_put("ScreenUpdating", &hidden);
+        let _ = app.invoke_put("AutomationSecurity", &no_macros);
         let result = (|| {
-            app.invoke_put("Visible", &hidden).map_err(|e| format!("couldn't hide Word: {e}"))?;
-            app.invoke_put("DisplayAlerts", &no_alerts).map_err(|e| format!("couldn't suppress Word alerts: {e}"))?;
-            app.invoke_put("AutomationSecurity", &no_macros).map_err(|e| format!("couldn't disable Office macros: {e}"))?;
             let documents = dispatch_property(&app, "Documents", "couldn't access Word documents")?;
             let path = w::Variant::from_str(source);
             let confirm = w::Variant::Bool(false);
@@ -177,11 +179,13 @@ mod windows_office {
             let out = w::Variant::from_str(target);
             let pdf = w::Variant::I4(17); // wdExportFormatPDF
             let exported = document.invoke_method("ExportAsFixedFormat", &[&out, &pdf]).map_err(|e| format!("Word couldn't export PDF: {e}"));
-            let dont_save = w::Variant::I4(0); // wdDoNotSaveChanges
             let _ = document.invoke_method("Close", &[&dont_save]);
+            drop(document);
+            drop(documents);
             exported.map(|_| ())
         })();
-        let _ = app.invoke_method("Quit", &[]);
+        let _ = app.invoke_method("Quit", &[&dont_save]);
+        drop(app);
         result
     }
 
@@ -189,9 +193,9 @@ mod windows_office {
         let app = application("PowerPoint.Application")?;
         let no_alerts = w::Variant::I4(1); // ppAlertsNone
         let no_macros = w::Variant::I4(3);
+        let _ = app.invoke_put("DisplayAlerts", &no_alerts);
+        let _ = app.invoke_put("AutomationSecurity", &no_macros);
         let result = (|| {
-            app.invoke_put("DisplayAlerts", &no_alerts).map_err(|e| format!("couldn't suppress PowerPoint alerts: {e}"))?;
-            app.invoke_put("AutomationSecurity", &no_macros).map_err(|e| format!("couldn't disable Office macros: {e}"))?;
             let presentations = dispatch_property(&app, "Presentations", "couldn't access PowerPoint presentations")?;
             let path = w::Variant::from_str(source);
             let read_only = w::Variant::Bool(true);
@@ -205,9 +209,12 @@ mod windows_office {
             let pdf = w::Variant::I4(32); // ppSaveAsPDF = 32
             let saved = presentation.invoke_method("SaveAs", &[&out, &pdf]).map_err(|e| format!("PowerPoint couldn't save PDF: {e}"));
             let _ = presentation.invoke_method("Close", &[]);
+            drop(presentation);
+            drop(presentations);
             saved.map(|_| ())
         })();
         let _ = app.invoke_method("Quit", &[]);
+        drop(app);
         result
     }
 

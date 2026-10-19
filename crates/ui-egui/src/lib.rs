@@ -706,9 +706,9 @@ pub struct PdfCraftApp {
     pub combine_zoom: f32,
     /// The Combine grid's thumbnails: rendered off the UI thread, a few at a time.
     pub(crate) combine_thumbs: combine_grid::Thumbs,
-    /// Channel to a background worker that reads files for the Combine tab sequentially.
+    /// Channel to a background worker that reads and prepares imported files sequentially.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) combine_worker: Option<std::sync::mpsc::Sender<files::CombineJob>>,
+    pub(crate) file_import_worker: Option<std::sync::mpsc::Sender<files::FileJob>>,
     /// Images waiting for the resolution choice (released on cancel).
     pub image_import: Option<create_ui::ImageImport>,
     /// The custom stamp library, and the stamp being created.
@@ -1024,7 +1024,7 @@ impl PdfCraftApp {
             combine_zoom: 1.0,
             combine_thumbs: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            combine_worker: None,
+            file_import_worker: None,
             image_import: None,
             custom_stamps: Vec::new(),
             stamp_draft: Default::default(),
@@ -1152,6 +1152,27 @@ impl PdfCraftApp {
     fn open_bytes_with_focus(&mut self, name: &str, path: Option<String>, bytes: Vec<u8>, activate: bool) -> Result<(), String> {
         // Images and text files become new, unsaved PDFs (Create a PDF).
         let active = self.active;
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.run_inline
+            && pdfcraft_engine::source_kind(name, &bytes) != Some(pdfcraft_engine::SourceKind::Pdf)
+            && pdfcraft_platform::is_office_document(name)
+        {
+            self.startup_superseded = true;
+            return self
+                .schedule_open(OpenRequest {
+                    name: name.to_owned(),
+                    path,
+                    stamp: None,
+                    input: open_worker::Input::Bytes(std::sync::Arc::new(bytes)),
+                    password: None,
+                    activate,
+                    after_open: None,
+                    recovered: None,
+                    then: None,
+                    mode: None,
+                })
+                .map(|_| ());
+        }
         if let Some(r) = self.open_converted(name, &bytes) {
             if !activate {
                 self.active = active;
@@ -1250,6 +1271,24 @@ impl PdfCraftApp {
                 Some(Err(error)) => self.notify_fmt("Couldn't open {name}: {e}", &[("name", &pending.name), ("e", &error)]),
                 None => {}
             },
+            open_worker::ResultKind::OfficeConversion(bytes) => {
+                let active = self.active;
+                let stem = pending.name.rsplit_once('.').map_or(pending.name.as_str(), |(stem, _)| stem);
+                match self.open_created_bytes(&format!("{stem}.pdf"), Ok(bytes)) {
+                    Ok(()) => {
+                        if !pending.activate {
+                            self.active = active;
+                        }
+                        if let Some(mode) = pending.mode {
+                            self.switch_mode(mode, true);
+                        }
+                        if let Some(command) = pending.then {
+                            self.execute(command);
+                        }
+                    }
+                    Err(error) => self.notify_fmt("Couldn't open {name}: {e}", &[("name", &pending.name), ("e", &error)]),
+                }
+            }
             open_worker::ResultKind::Prepared { bytes, result } => match *result {
                 Ok(prepared) => match self.finish_open(&pending.name, pending.path.clone(), bytes.len(), prepared, pending.activate) {
                     Ok(id) => {
@@ -1515,6 +1554,26 @@ impl PdfCraftApp {
         };
         view.insert_at = Some(gap);
         if let Some(drop) = self.grid_drop.take() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let has_office = drop.files.iter().any(|(name, _)| pdfcraft_platform::is_office_document(name));
+                if has_office {
+                    self.queue_import(
+                        files::FilePurpose::InsertPages,
+                        drop.files
+                            .into_iter()
+                            .map(|(name, source)| match source {
+                                Ok(bytes) => files::FileInput::Bytes(name, bytes),
+                                Err(path) => files::FileInput::Path(path),
+                            })
+                            .collect(),
+                        None,
+                    );
+                } else {
+                    self.insert_each(drop.files.into_iter().map(read_grid_file));
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
             self.insert_each(drop.files.into_iter().map(read_grid_file));
         }
     }
@@ -1827,6 +1886,10 @@ impl PdfCraftApp {
     /// so worker callbacks can request a repaint when reads finish.
     pub fn set_context(&mut self, ctx: &egui::Context) {
         self.ctx = Some(ctx.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(worker) = &self.open_worker {
+            worker.set_context(ctx);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1860,16 +1923,21 @@ impl PdfCraftApp {
             }
             return;
         }
-        if self.pending_opens.iter().any(|p| p.path.as_deref().is_some_and(|p| same_file(p, path))) {
+        if let Some(pending) = self.pending_opens.iter_mut().find(|p| p.path.as_deref().is_some_and(|p| same_file(p, path))) {
+            if mode.is_some() {
+                pending.mode = mode;
+            }
+            if then.is_some() {
+                pending.then = then;
+            }
             return;
         }
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
         // Taken before reading: a build that rewrites the file meanwhile still counts as a change.
         let stamp = file_watch::Stamp::at(path);
-        // Before the first frame there is no interaction to keep responsive; this also preserves
-        // deterministic inline startup and test flows. Once live, reading and preparation use
-        // the bounded worker and commit on the UI thread.
-        if self.ctx.is_none() || self.run_inline {
+        // Preserve inline startup for PDFs and engine-supported images/text. Office conversion
+        // may wait on another application, so it uses the worker even before the first frame.
+        if self.run_inline || (self.ctx.is_none() && !pdfcraft_platform::is_office_document(&name)) {
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let before = self.views.len();
@@ -1915,7 +1983,7 @@ impl PdfCraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn open_picker() -> rfd::AsyncFileDialog {
         let convertible = create_ui::convertible_extensions();
-        rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images, Office and text (converted to PDF)"), &convertible)
+        rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images and text (converted to PDF)"), &convertible)
     }
 
     pub fn open_dialog(&mut self) {
@@ -1925,7 +1993,7 @@ impl PdfCraftApp {
             let convertible = create_ui::convertible_extensions();
             self.pick(
                 pickers::PickFor::Open,
-                rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images, Office and text (converted to PDF)"), &convertible),
+                rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]).add_filter(tl!("Images and text (converted to PDF)"), &convertible),
                 true,
             );
         }
@@ -2588,11 +2656,15 @@ impl PdfCraftApp {
                 self.mode_override = Some(mode);
                 let left = self.left;
                 let left_open = self.left_open;
+                let right = self.right;
                 self.switch_mode(mode, true);
                 if left != LeftPanel::AllTools {
                     self.left = left;
                 }
                 self.left_open = left_open;
+                if right.is_some() {
+                    self.right = right;
+                }
             }
             ("default-mode", _) => {
                 self.default_mode = Mode::parse(value).ok_or("default-mode must be all, read, edit, convert or sign")?;

@@ -464,8 +464,8 @@ fn app_creator<'a>(
                 &[("folder", &w.folder.display().to_string()), ("error", &w.error)],
             );
         }
+        app.set_context(&cc.egui_ctx);
         if combine {
-            app.set_context(&cc.egui_ctx);
             app.open_combine_tab();
             if !files.is_empty() {
                 app.add_paths_to_combine(&files);

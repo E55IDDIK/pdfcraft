@@ -18,6 +18,48 @@ enum Stop {
     Build(EditError),
 }
 
+#[derive(Debug)]
+pub(crate) enum CreateMultipleFailure {
+    Read { name: String, error: String },
+    Build(String),
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateMultipleOutput {
+    pub bytes: Option<std::sync::Arc<Vec<u8>>>,
+    pub converted: usize,
+    pub refused: Vec<String>,
+}
+
+/// Convert and join inputs incrementally. Native import workers use this so they retain only the
+/// current input and the growing output rather than every selected file's bytes.
+pub(crate) fn build_create_multiple_output<I>(session: &pdfcraft_engine::Session, files: I) -> Result<CreateMultipleOutput, CreateMultipleFailure>
+where
+    I: IntoIterator<Item = crate::files::FileResult>,
+{
+    let (mut refused, mut converted) = (Vec::new(), 0usize);
+    let mut files = files.into_iter();
+    let sources = std::iter::from_fn(|| {
+        loop {
+            match files.next()? {
+                Ok(file) => match crate::create_ui::convert_prepared_input_to_pdf(session, &file) {
+                    Ok(pdf) => {
+                        converted += 1;
+                        return Some(Ok((stem(&file.name).to_string(), pdf, None)));
+                    }
+                    Err(_) => refused.push(file.name),
+                },
+                Err((name, error)) => return Some(Err(Stop::Read { name, error })),
+            }
+        }
+    });
+    let bytes = session.combine_each(sources).map_err(|error| match error {
+        Stop::Read { name, error } => CreateMultipleFailure::Read { name, error },
+        Stop::Build(error) => CreateMultipleFailure::Build(error.to_string()),
+    })?;
+    Ok(CreateMultipleOutput { bytes, converted, refused })
+}
+
 impl From<EditError> for Stop {
     fn from(e: EditError) -> Self {
         Stop::Build(e)
@@ -31,23 +73,34 @@ impl PdfCraftApp {
     where
         I: IntoIterator<Item = Result<(String, Vec<u8>), (String, String)>>,
     {
+        self.stage_create_separate_prepared(
+            files.into_iter().map(|file| file.map(|(name, bytes)| crate::files::PreparedFile::unconverted(name, bytes))),
+            dir,
+        );
+    }
+
+    pub(crate) fn stage_create_separate_prepared<I>(&mut self, files: I, dir: Option<PathBuf>)
+    where
+        I: IntoIterator<Item = crate::files::FileResult>,
+    {
         let mut used = HashSet::new();
         let mut made = 0usize;
         let mut refused = Vec::new();
         for file in files {
-            let (name, bytes) = match file {
+            let file = match file {
                 Ok(file) => file,
                 Err((name, error)) => {
                     refused.push(format!("{name} ({error})"));
                     continue;
                 }
             };
-            let kind = pdfcraft_engine::source_kind(&name, &bytes);
+            let name = file.name.clone();
+            let kind = pdfcraft_engine::source_kind(&name, &file.bytes);
             if kind == Some(SourceKind::Pdf) {
                 refused.push(format!("{name} ({})", tl!("already a PDF")));
                 continue;
             }
-            let pdf = match crate::create_ui::convert_input_to_pdf(&self.session, &name, &bytes) {
+            let pdf = match crate::create_ui::convert_prepared_input_to_pdf(&self.session, &file) {
                 Ok(pdf) => pdf,
                 Err(error) => {
                     refused.push(format!("{name} ({error})"));
@@ -105,41 +158,38 @@ impl PdfCraftApp {
     where
         I: IntoIterator<Item = Result<(String, Vec<u8>), (String, String)>>,
     {
-        let (mut refused, mut converted) = (Vec::new(), 0usize);
-        let mut files = files.into_iter();
-        let session = &self.session;
-        let sources = std::iter::from_fn(|| {
-            loop {
-                match files.next()? {
-                    Ok((name, bytes)) => match crate::create_ui::convert_input_to_pdf(session, &name, &bytes) {
-                        Ok(pdf) => {
-                            converted += 1;
-                            return Some(Ok((stem(&name).to_string(), pdf, None)));
-                        }
-                        Err(_) => refused.push(name),
-                    },
-                    Err((name, error)) => return Some(Err(Stop::Read { name, error })),
-                }
-            }
-        });
-        let bytes = match session.combine_each(sources) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                self.notify_tr("None of those files can be made into a PDF; use PDFs, images or .txt files");
-                return;
-            }
-            Err(Stop::Read { name, error }) => {
+        self.stage_create_multiple_prepared(
+            files.into_iter().map(|file| file.map(|(name, bytes)| crate::files::PreparedFile::unconverted(name, bytes))),
+        );
+    }
+
+    pub(crate) fn stage_create_multiple_prepared<I>(&mut self, files: I)
+    where
+        I: IntoIterator<Item = crate::files::FileResult>,
+    {
+        let output = build_create_multiple_output(&self.session, files);
+        self.finish_create_multiple(output);
+    }
+
+    pub(crate) fn finish_create_multiple(&mut self, output: Result<CreateMultipleOutput, CreateMultipleFailure>) {
+        let output = match output {
+            Ok(output) => output,
+            Err(CreateMultipleFailure::Read { name, error }) => {
                 self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &error)]);
                 return;
             }
-            Err(Stop::Build(e)) => {
-                self.notify_fmt("Couldn't create a PDF: {e}", &[("e", &e.to_string())]);
+            Err(CreateMultipleFailure::Build(error)) => {
+                self.notify_fmt("Couldn't create a PDF: {e}", &[("e", &error)]);
                 return;
             }
         };
-        let n = converted.to_string();
-        let message = if !refused.is_empty() {
-            crate::i18n::fmt(tl!("Created a PDF from {n} files; left out: {names}"), &[("n", &n), ("names", &refused.join(", "))])
+        let Some(bytes) = output.bytes else {
+            self.notify_tr("None of those files can be made into a PDF; use PDFs, images or .txt files");
+            return;
+        };
+        let n = output.converted.to_string();
+        let message = if !output.refused.is_empty() {
+            crate::i18n::fmt(tl!("Created a PDF from {n} files; left out: {names}"), &[("n", &n), ("names", &output.refused.join(", "))])
         } else {
             crate::i18n::fmt(tl!("Created a PDF from {n} files"), &[("n", &n)])
         };
@@ -150,5 +200,58 @@ impl PdfCraftApp {
         {
             view.open_organize();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_multiple_uses_prepared_office_pdf_bytes() {
+        let mut app = PdfCraftApp::new();
+        let pdf = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        app.stage_create_multiple_prepared(vec![Ok(crate::files::PreparedFile {
+            name: "report.docx".into(),
+            bytes: b"synthetic Office source".to_vec(),
+            modified: None,
+            converted: Some(Ok(pdf)),
+        })]);
+        assert_eq!(app.views.len(), 1);
+        let doc = app.session.get(app.views[0].id).unwrap();
+        assert_eq!(doc.name, "Combined.pdf");
+        assert_eq!(doc.info.pages.len(), 1);
+    }
+
+    #[test]
+    fn create_multiple_reports_when_prepared_office_conversion_fails() {
+        let mut app = PdfCraftApp::new();
+        app.stage_create_multiple_prepared(vec![Ok(crate::files::PreparedFile {
+            name: "report.docx".into(),
+            bytes: b"synthetic Office source".to_vec(),
+            modified: None,
+            converted: Some(Err("synthetic conversion failure".into())),
+        })]);
+        assert!(app.views.is_empty());
+        assert!(app.toast.is_some());
+    }
+
+    #[test]
+    fn create_multiple_output_combines_inputs_incrementally_in_order() {
+        let mut session = pdfcraft_engine::Session::new();
+        let first = session.create_blank(200.0, 300.0, 1).unwrap();
+        let second = session.create_blank(200.0, 300.0, 2).unwrap();
+        let output = build_create_multiple_output(
+            &session,
+            vec![
+                Ok(crate::files::PreparedFile::unconverted("first.pdf".into(), first.as_ref().clone())),
+                Ok(crate::files::PreparedFile::unconverted("second.pdf".into(), second.as_ref().clone())),
+            ],
+        )
+        .unwrap();
+        let bytes = output.bytes.unwrap();
+        assert_eq!(output.converted, 2);
+        let doc = session.open_new("Combined.pdf", bytes).unwrap();
+        assert_eq!(session.get(doc).unwrap().info.pages.len(), 3);
     }
 }

@@ -2,6 +2,21 @@
 
 use pdfcraft_ui_egui::PdfCraftApp;
 
+#[test]
+fn opening_pdf_bytes_keeps_the_normal_document_path() {
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    let bytes = app.session.create_from_text("source", "ordinary PDF").unwrap();
+    let path = std::env::temp_dir().join(format!("pdfcraft-open-pdf-{}.pdf", std::process::id()));
+    let path = path.to_string_lossy().into_owned();
+
+    app.open_bytes("ordinary.pdf", Some(path.clone()), bytes.to_vec()).unwrap();
+
+    let doc = app.session.get(app.views[0].id).unwrap();
+    assert_eq!(doc.name, "ordinary.pdf");
+    assert_eq!(doc.path.as_deref(), Some(path.as_str()), "PDF bytes should not become an unsaved created document");
+}
+
 fn png() -> Vec<u8> {
     let mut out = Vec::new();
     {
@@ -244,9 +259,9 @@ fn mixed_files(app: &PdfCraftApp) -> Vec<(String, Vec<u8>)> {
     let pdf = app.session.create_from_text("a", "from a pdf").unwrap();
     vec![
         ("notes.txt".into(), b"from text".to_vec()),
-        ("report.docx".into(), b"PK\x03\x04".to_vec()),
         ("a.pdf".into(), pdf.to_vec()),
         ("photo.png".into(), png()),
+        ("bad.png".into(), b"\x89PNG\r\n\x1a\nbad".to_vec()),
     ]
 }
 
@@ -270,7 +285,7 @@ fn separate_batch_creates_one_pdf_per_source_without_replacing_existing_files() 
         assert!(std::fs::read(dir.join(name)).unwrap().starts_with(b"%PDF-"), "{name}");
     }
     assert!(!dir.join("a (2).pdf").exists(), "an already-PDF input is skipped");
-    assert!(!dir.join("report.pdf").exists(), "an invalid Office file is skipped");
+    assert!(!dir.join("bad.pdf").exists(), "an invalid image is skipped");
     assert!(app.views.is_empty(), "batch conversion must not open PDF tabs");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -319,7 +334,7 @@ fn multiple_files_open_as_one_document_in_the_page_grid() {
         assert_eq!(doc.info.pages.len(), 3, "the Word file can't be converted and is left out");
         assert_eq!(doc.info.outline.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(), ["notes", "a", "photo"]);
     }
-    h.get_by_label_contains("left out: report.docx");
+    h.get_by_label_contains("left out: bad.png");
     h.get_by_label("Insert a file before page 2");
     if let Ok(path) = std::env::var("PDFCRAFT_CREATE_MULTIPLE_SHOT") {
         h.run_steps(20);
@@ -343,7 +358,7 @@ fn multiple_files_open_as_one_document_in_the_page_grid() {
 fn multiple_files_that_cannot_be_converted_open_nothing() {
     let mut app = PdfCraftApp::new();
     app.set_option("language", "en").unwrap();
-    app.use_files(pdfcraft_ui_egui::FilePurpose::CreateMultiple, vec![("report.docx".into(), b"PK\x03\x04".to_vec())]);
+    app.use_files(pdfcraft_ui_egui::FilePurpose::CreateMultiple, vec![("bad.png".into(), b"\x89PNG\r\n\x1a\nbad".to_vec())]);
     assert!(app.views.is_empty());
     assert!(app.toast.is_some());
 }

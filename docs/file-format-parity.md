@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (XDP data row corrected; BigTIFF in Create PDF) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** minor (Word/PowerPoint import is partial in native desktop and headless workflows; suite fidelity remains unverified) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 Every format Acrobat Pro reads or writes, and PdfCraft's support for it. Acrobat's list comes from
 its bundle's `Info.plist` `CFBundleDocumentTypes` (what it opens) and its public documentation
@@ -12,9 +12,9 @@ Legend: **R** read/import, **W** write/export. Fidelity: *high* (tested against 
 or round-trips exactly), *good* (tested, known limits), *basic* (works, visibly lossy), *none*.
 
 **File formats and conversion ≈ 40% ready** (estimated): PDF itself is strong except encrypted
-output interoperability; the conversion formats users reach for most (Word, Excel, PowerPoint,
-Office to PDF, OCR beyond English) are weak or missing. **120–220 h** to parity (within the
-features total).
+output interoperability; Word and PowerPoint can be imported through selected native workflows,
+but Office import fidelity and coverage, Word export, Excel conversion and OCR beyond English are
+weak or missing. **120–220 h** to parity (within the features total).
 
 ## PDF
 
@@ -68,13 +68,14 @@ features total).
 | Plain text | yes | yes | good | `create.from-text` |
 | Clipboard (image or text) | yes | yes | good | `create.from-clipboard` |
 | Screenshot | yes | no | none | `create.from-screenshot` planned |
-| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | no | none | `create.from-office` planned (LibreOffice sidecar) |
+| Word and PowerPoint (`.doc/.docx/.ppt/.pptx`) | yes | partial: selected native desktop workflows; `doc_create_multiple` and `doc_combine` | not verified against an Office suite or Office-authored fixtures | `create.from-office` partial; extension and routing tests only |
+| Excel, Visio, Publisher | yes | no | none | not supported |
 | HTML file, web page URL | yes | no | none | `create.from-html`, `create.from-web-page` planned |
 | RTF | yes | no | none | |
 | PostScript / EPS (Distiller) | yes | no | none | `create.distiller` planned (P3) |
 | Markdown | no | no | none | `create.from-markdown` planned (P2; not an Acrobat feature) |
 | Scanner | yes | no | none | `ocr.scanner-acquire` planned |
-| Several files at once | yes | yes: combine PDFs, images and text into one document, or create a separate PDF for each non-PDF source (GUI and `doc_create_multiple mode=separate`); existing outputs get numbered names | good for supported source types | `create.create-multiple`, `separate_batch_creates_one_pdf_per_source_without_replacing_existing_files` |
+| Several files at once | yes | yes: combine PDFs, images, text, Word and PowerPoint into one document, or create a separate PDF for each non-PDF source (GUI and `doc_create_multiple mode=separate`); existing outputs get numbered names | good for PDFs, images and text; Office conversion not independently verified | `create.create-multiple`, `create.from-office`, `separate_batch_creates_one_pdf_per_source_without_replacing_existing_files` |
 
 ## Export PDF to
 
@@ -110,6 +111,7 @@ features total).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Word/PowerPoint import is partial through selected native desktop and headless workflows; real Office-suite fidelity and Excel remain unsupported or unverified. |
 | 2026-10-12 | minor | XDP split into data (read and write for XFA forms, already shipped under `form.xfa-data`) and opening `.xdp` as a document (none). Create PDF reads BigTIFF; malformed GIF headers are no longer detected as images. |
 | 2026-10-11 | minor | #773: inferred tables have no invented borders; rotated or overlapping invoice pages use floating shapes and page sections. Full Office layout fidelity remains partial. |
 | 2026-10-11 | minor | Encrypted PDF row: written files open in Acrobat DC (#774, fixed by #836). FDF row: #807, #809 and #819 fixed |

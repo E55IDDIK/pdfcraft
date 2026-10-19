@@ -619,6 +619,7 @@ fn inline_tool_open_keeps_its_command_for_pdf_conversion_and_password_retry() {
         std::fs::write(&path, bytes).expect("write selected file");
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").expect("language preference");
+        app.run_inline = true;
         assert!(app.ctx.is_none(), "this exercises the no-context inline path");
         app.open_path_then(&path.to_string_lossy(), Some("export.text"));
         if encrypted {
@@ -634,6 +635,34 @@ fn inline_tool_open_keeps_its_command_for_pdf_conversion_and_password_retry() {
         assert!(matches!(app.dialog, Some(crate::Dialog::Export(_))), "the inline {name} retains its export command");
         let _ = std::fs::remove_file(path);
     }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+fn pre_frame_path_open_uses_worker_and_pdf_bytes_are_not_office_converted() {
+    let path = std::env::temp_dir().join(format!("pdfcraft-pre-frame-{}.docx", std::process::id()));
+    let mut pdf = b"allowed prefix before the PDF header\n".to_vec();
+    pdf.extend_from_slice(&fixture(1));
+    std::fs::write(&path, pdf).expect("write PDF bytes with an Office extension");
+    let (gate, started, release, finished) = open_worker::prepare_gate();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").expect("language preference");
+    app.open_prepare_gate = Some(gate);
+
+    app.open_path(&path.to_string_lossy());
+    started.recv_timeout(Duration::from_secs(5)).expect("pre-frame open reached its worker");
+    assert!(app.ctx.is_none());
+    assert!(app.views.is_empty(), "the UI thread does not read or prepare the file inline");
+    assert_eq!(app.pending_opens.len(), 1);
+
+    release.send(()).expect("release worker barrier");
+    finished.recv_timeout(Duration::from_secs(5)).expect("worker completed the open");
+    app.poll_pending_opens();
+    assert_eq!(app.views.len(), 1);
+    let doc = app.session.get(app.views[0].id).expect("PDF opens normally");
+    assert_eq!(doc.path.as_deref(), path.to_str());
+    assert_eq!(doc.info.pages.len(), 1);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

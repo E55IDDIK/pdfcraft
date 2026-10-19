@@ -20,6 +20,7 @@ pub(crate) enum Input {
 
 pub(crate) enum ResultKind {
     Conversion(Arc<Vec<u8>>),
+    OfficeConversion(Arc<Vec<u8>>),
     Prepared { bytes: Arc<Vec<u8>>, result: Box<Result<PreparedDocument, OpenError>> },
     ReadFailed(String),
     RemoteFailed(String),
@@ -175,12 +176,16 @@ fn prepare(job: Job) -> ResultKind {
         },
         Input::Bytes(bytes) => bytes.clone(),
     };
+    if pdfcraft_engine::source_kind(&job.name, &bytes) == Some(pdfcraft_engine::SourceKind::Pdf) {
+        let result = job.context.prepare_open(job.name, job.path, bytes.clone(), job.password.as_deref());
+        return ResultKind::Prepared { bytes, result: Box::new(result) };
+    }
     if matches!(pdfcraft_engine::source_kind(&job.name, &bytes), Some(SourceKind::Image | SourceKind::Text)) {
         return ResultKind::Conversion(bytes);
     }
     if pdfcraft_platform::is_office_document(&job.name) {
         return match pdfcraft_platform::office_to_pdf(&job.name, &bytes) {
-            Ok(pdf) => ResultKind::Conversion(Arc::new(pdf)),
+            Ok(pdf) => ResultKind::OfficeConversion(Arc::new(pdf)),
             Err(error) => ResultKind::Failed(error),
         };
     }

@@ -91,6 +91,21 @@ pub(crate) fn convert_input(session: &Session, name: &str, bytes: &Arc<Vec<u8>>)
     session.convert_to_pdf(name, bytes).map(|(kind, pdf)| (Some(kind), pdf)).map_err(failed)
 }
 
+fn combine_input_pdf_with<F>(session: &Session, name: &str, bytes: &Arc<Vec<u8>>, office_convert: F) -> Result<Arc<Vec<u8>>>
+where
+    F: FnOnce(&Session, &str, &Arc<Vec<u8>>) -> Result<(Option<pdfcraft_engine::SourceKind>, Arc<Vec<u8>>)>,
+{
+    if matches!(pdfcraft_engine::source_kind(name, bytes), Some(pdfcraft_engine::SourceKind::Pdf)) {
+        session.as_pdf(name, bytes).map_err(failed)
+    } else if pdfcraft_platform::is_office_document(name) {
+        office_convert(session, name, bytes).map(|(_, pdf)| pdf)
+    } else {
+        // Keep Session::as_pdf for all engine-supported inputs, including encrypted PDFs; the
+        // Office sidecar is only a fallback for formats the engine cannot parse.
+        session.as_pdf(name, bytes).map_err(failed)
+    }
+}
+
 impl From<pdfcraft_engine::EditError> for ToolError {
     fn from(e: pdfcraft_engine::EditError) -> Self {
         failed(e)
@@ -1691,7 +1706,7 @@ impl Automation {
                     let bytes = Arc::new(std::fs::read(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?);
                     // Images and text files are made into PDFs first (#569), as in the Combine files tab.
                     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.session.as_pdf(&file_name, &bytes).map_err(failed)?
+                    combine_input_pdf_with(&self.session, &file_name, &bytes, convert_input)?
                 }
             };
             let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2657,6 +2672,41 @@ mod tests {
         }
         out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
         out
+    }
+
+    #[test]
+    fn combining_office_uses_converter_but_pdfs_keep_the_engine_path() {
+        let automation = Automation::new();
+        let office_input = Arc::new(b"synthetic Office container".to_vec());
+        let expected_pdf = Arc::new(numbered_pages(1));
+        let office_called = std::cell::Cell::new(false);
+        let office_pdf = combine_input_pdf_with(&automation.session, "report.docx", &office_input, |_, _, _| {
+            office_called.set(true);
+            Ok((None, expected_pdf.clone()))
+        })
+        .expect("the Office converter result is used");
+        assert!(office_called.get());
+        assert!(Arc::ptr_eq(&office_pdf, &expected_pdf));
+
+        let pdf_input = Arc::new(numbered_pages(1));
+        let office_called = std::cell::Cell::new(false);
+        let pdf = combine_input_pdf_with(&automation.session, "ordinary.pdf", &pdf_input, |_, _, _| {
+            office_called.set(true);
+            Err(ToolError::Failed("must not convert a PDF".into()))
+        })
+        .expect("the engine accepts a PDF without Office");
+        assert!(!office_called.get());
+        assert!(Arc::ptr_eq(&pdf, &pdf_input));
+
+        let pdf_with_office_name = Arc::new(numbered_pages(1));
+        let office_called = std::cell::Cell::new(false);
+        let pdf = combine_input_pdf_with(&automation.session, "report.docx", &pdf_with_office_name, |_, _, _| {
+            office_called.set(true);
+            Err(ToolError::Failed("must not convert PDF bytes based on the extension".into()))
+        })
+        .expect("PDF bytes with an Office extension still use the PDF reader");
+        assert!(!office_called.get());
+        assert!(Arc::ptr_eq(&pdf, &pdf_with_office_name));
     }
 
     fn json(a: &mut Automation, tool: &str, args: Value) -> Value {

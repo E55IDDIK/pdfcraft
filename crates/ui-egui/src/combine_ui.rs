@@ -2415,6 +2415,8 @@ impl PdfCraftApp {
             let source = bytes.clone();
             let converted = if let Some(pdf) = converted {
                 pdf.map_err(pdfcraft_engine::EditError::Source)
+            } else if pdfcraft_engine::source_kind(&name, &bytes) == Some(pdfcraft_engine::SourceKind::Pdf) {
+                self.session.as_pdf(&name, &bytes)
             } else if pdfcraft_platform::is_office_document(&name) {
                 crate::create_ui::convert_input_to_pdf(&self.session, &name, &bytes).map_err(pdfcraft_engine::EditError::Source)
             } else {
@@ -2637,6 +2639,24 @@ mod tests {
         })
         .unwrap();
         pdfcraft_cos::write_full(&doc, &Default::default()).unwrap()
+    }
+
+    #[test]
+    fn combine_stages_preconverted_office_bytes_without_calling_the_converter_on_the_ui_path() {
+        let mut app = PdfCraftApp::new();
+        let pdf = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        app.stage_combine_with(vec![Incoming {
+            name: "report.docx".into(),
+            bytes: Arc::new(b"synthetic Office source".to_vec()),
+            modified: None,
+            note: None,
+            open_doc: None,
+            converted: Some(Ok(pdf.clone())),
+        }]);
+        assert_eq!(app.combine_draft.len(), 1);
+        assert_eq!(app.combine_draft[0].name, "report.docx");
+        assert!(Arc::ptr_eq(&app.combine_draft[0].bytes, &pdf));
+        assert_eq!(app.combine_draft[0].pages, 1);
     }
 
     #[test]

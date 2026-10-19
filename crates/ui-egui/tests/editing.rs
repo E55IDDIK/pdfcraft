@@ -52,6 +52,15 @@ fn harness(pages: usize, setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harn
     h
 }
 
+fn run_until(h: &mut Harness<'static, PdfCraftApp>, ready: impl Fn(&PdfCraftApp) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready(h.state()) && std::time::Instant::now() < deadline {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(ready(h.state()), "background file operation did not finish before the test deadline");
+}
+
 fn organize(pages: usize) -> Harness<'static, PdfCraftApp> {
     harness(pages, |app| app.set_option("organize", "on").unwrap())
 }
@@ -1408,13 +1417,13 @@ fn a_folder_adds_its_pdfs_images_and_text_in_order_and_optionally_its_subfolders
     h.run_steps(2);
     h.state_mut().pick_override = Some(vec![dir.to_string_lossy().into_owned()]);
     h.get_by_label("Add folder…").click();
-    h.run_steps(4);
+    run_until(&mut h, |app| app.combine_draft.len() == 3);
     assert_eq!(combine_names(&h), ["notes.txt", "page2.PDF", "page10.pdf"], "numbers by value");
     // The toolbar's menu: the folder and its subfolders, as one undo step.
     h.get_by_label("More ways to add files").click();
     h.run_steps(2);
     h.get_by_label("Add folder and subfolders…").click();
-    h.run_steps(4);
+    run_until(&mut h, |app| app.combine_draft.len() == 7);
     assert_eq!(combine_names(&h), ["notes.txt", "page2.PDF", "page10.pdf", "notes.txt", "page2.PDF", "page10.pdf", "inner.pdf"]);
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(2);
@@ -1446,10 +1455,10 @@ fn images_and_text_files_join_the_combine_list_as_pdfs() {
 #[test]
 fn files_that_cannot_be_read_are_listed_and_left_out_once_the_user_agrees() {
     let mut h = combine_of(&[("one.pdf", 2)]);
-    let bad = vec![("broken.jpg".to_string(), b"\xff\xd8\xff\xe0 not a JPEG".to_vec()), ("report.docx".to_string(), b"PK\x03\x04".to_vec())];
+    let bad = vec![("broken.jpg".to_string(), b"\xff\xd8\xff\xe0 not a JPEG".to_vec()), ("report.bin".to_string(), b"PK\x03\x04".to_vec())];
     h.state_mut().use_files(pdfcraft_ui_egui::FilePurpose::Combine, bad);
     h.run_steps(3);
-    assert_eq!(combine_names(&h), ["one.pdf", "broken.jpg", "report.docx"]);
+    assert_eq!(combine_names(&h), ["one.pdf", "broken.jpg", "report.bin"]);
     for f in &h.state().combine_draft[1..] {
         let why = f.problem.as_deref().expect("why it can't be combined");
         assert!(why.starts_with("Can't be read: ") && !why.contains(&f.name), "{why}");
@@ -1466,7 +1475,7 @@ fn files_that_cannot_be_read_are_listed_and_left_out_once_the_user_agrees() {
     h.run_steps(3);
     h.get_by_label("Leave out files that can't be read?");
     h.get_by_label("• broken.jpg");
-    h.get_by_label("• report.docx");
+    h.get_by_label("• report.bin");
     h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(h.query_by_label("Leave out files that can't be read?").is_none());
@@ -1743,7 +1752,7 @@ fn plus_between_pages_inserts_picked_files_there_in_order() {
     assert_eq!(texts_of(h.state(), 0), ["a note", "Page 1", "a note", "Page 2", "Page 3", "a note"]);
     // A file that can't be converted changes nothing.
     let before = texts_of(h.state(), 0);
-    h.state_mut().use_files(pdfcraft_ui_egui::FilePurpose::InsertPages, vec![("report.docx".into(), b"PK\x03\x04".to_vec())]);
+    h.state_mut().use_files(pdfcraft_ui_egui::FilePurpose::InsertPages, vec![("bad.png".into(), b"\x89PNG\r\n\x1a\nbad".to_vec())]);
     h.run_steps(2);
     assert_eq!(texts_of(h.state(), 0), before);
 }
@@ -4930,7 +4939,7 @@ fn os_event_edit_path_applies_only_to_requested_file() {
     let queue = std::rc::Rc::new(std::cell::RefCell::new(vec![OsEvent::Edit(vec![edit_str])]));
     let q = std::rc::Rc::clone(&queue);
     h.state_mut().os_events = Some(Box::new(move || q.borrow_mut().drain(..).collect()));
-    h.run_steps(6);
+    run_until(&mut h, |app| app.views.len() > 1 && app.mode == Mode::Edit);
 
     // The file opened by OsEvent::Edit is active and in Edit mode.
     assert_eq!(h.state().mode, Mode::Edit);
@@ -4938,11 +4947,29 @@ fn os_event_edit_path_applies_only_to_requested_file() {
     // A subsequent normal open must open in the default mode, not Edit mode.
     let normal_str = normal_path.to_string_lossy().into_owned();
     h.state_mut().open_path(&normal_str);
-    h.run_steps(6);
+    run_until(&mut h, |app| app.views.len() > 2 && app.mode == Mode::Read);
     assert_eq!(h.state().mode, Mode::Read);
 
     let _ = std::fs::remove_file(&edit_path);
     let _ = std::fs::remove_file(&normal_path);
+}
+
+#[test]
+fn edit_intent_is_kept_when_the_same_file_is_already_opening() {
+    use pdfcraft_ui_egui::{Mode, QuickTool};
+    let path = temp_path("open-then-edit-race.pdf");
+    std::fs::write(&path, fixture(1)).unwrap();
+
+    let mut h = harness(1, |_| {});
+    h.state_mut().default_mode = Mode::Read;
+    h.state_mut().switch_mode(Mode::Read, true);
+    let path = path.to_string_lossy().into_owned();
+    h.state_mut().open_path(&path);
+    h.state_mut().open_path_in_mode(&path, Mode::Edit);
+    run_until(&mut h, |app| app.views.len() > 1 && app.mode == Mode::Edit);
+
+    assert_eq!(h.state().mode, Mode::Edit);
+    assert_eq!(h.state().quick_tool, QuickTool::EditText);
 }
 
 /// The Read mode command (not the mode bar) applies a paragraph still open in the editor, as

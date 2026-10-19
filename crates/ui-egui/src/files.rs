@@ -70,7 +70,7 @@ fn files_picker(purpose: FilePurpose) -> rfd::AsyncFileDialog {
         return dialog.add_filter("PDF", &["pdf"]);
     }
     let all: Vec<&str> = std::iter::once("pdf").chain(pdfcraft_engine::CONVERTIBLE).chain(crate::create_ui::OFFICE_CONVERTIBLE).collect();
-    dialog.add_filter(tl!("PDF, images, Office and text"), &all).add_filter("PDF", &["pdf"])
+    dialog.add_filter(tl!("PDF, images and text"), &all).add_filter("PDF", &["pdf"])
 }
 
 /// The Replace Pages dialog: the chosen file and the ranges (1-based, inclusive).
@@ -109,28 +109,77 @@ pub struct PickTarget {
     generation: Option<u64>,
 }
 
-/// Files picked asynchronously in a browser, waiting for the next frame (see
-/// [`PdfCraftApp::file_request`]).
+/// A file read for an import, with any Office conversion already completed off the UI thread.
+#[derive(Debug)]
+pub(crate) struct PreparedFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub modified: Option<std::time::SystemTime>,
+    pub converted: Option<Result<Arc<Vec<u8>>, String>>,
+}
+
+impl PreparedFile {
+    pub(crate) fn unconverted(name: String, bytes: Vec<u8>) -> Self {
+        Self { name, bytes, modified: None, converted: None }
+    }
+}
+
+pub(crate) type FileResult = Result<PreparedFile, (String, String)>;
+
+/// Files picked asynchronously, waiting for the next frame (see [`PdfCraftApp::file_request`]).
 #[derive(Debug)]
 pub struct FileRequest {
     purpose: FilePurpose,
     target: Option<PickTarget>,
-    files: Vec<(String, Vec<u8>)>,
-    modified: Vec<Option<std::time::SystemTime>>,
-    error: Option<(String, String)>,
-    converted: Vec<Option<Result<Arc<Vec<u8>>, String>>>,
+    files: Vec<FileResult>,
+    output_dir: Option<std::path::PathBuf>,
+    create_multiple: Option<Result<crate::create_multiple_ui::CreateMultipleOutput, crate::create_multiple_ui::CreateMultipleFailure>>,
 }
 
 /// Files picked asynchronously (web), waiting to be used.
 pub type Requests = Arc<std::sync::Mutex<Vec<FileRequest>>>;
 
-/// A job queued for the background Combine file reader.
+/// A file input for the native background reader.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct CombineJob {
-    pub paths: Vec<std::path::PathBuf>,
+pub(crate) enum FileInput {
+    Path(std::path::PathBuf),
+    Bytes(String, Vec<u8>),
+}
+
+/// A job queued for the native background file reader and Office converter.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct FileJob {
+    pub inputs: Vec<FileInput>,
     pub request: FileRequest,
     pub requests: Requests,
     pub ctx: Option<egui::Context>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_file_input(input: FileInput) -> FileResult {
+    prepare_file_input_with(input, |name, bytes| pdfcraft_platform::office_to_pdf(name, bytes).map(Arc::new))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_file_input_with(input: FileInput, office_convert: impl FnOnce(&str, &[u8]) -> Result<Arc<Vec<u8>>, String>) -> FileResult {
+    let (name, bytes, modified) = match input {
+        FileInput::Path(path) => {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file.pdf".into());
+            let bytes = std::fs::read(&path).map_err(|error| (name.clone(), error.to_string()))?;
+            let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok();
+            (name, bytes, modified)
+        }
+        FileInput::Bytes(name, bytes) => (name, bytes, None),
+    };
+    let is_pdf = pdfcraft_engine::source_kind(&name, &bytes) == Some(pdfcraft_engine::SourceKind::Pdf);
+    let converted = if !is_pdf && pdfcraft_platform::is_office_document(&name) {
+        let conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| office_convert(&name, &bytes)))
+            .unwrap_or_else(|_| Err("Office conversion failed unexpectedly in the background worker".into()));
+        Some(conversion)
+    } else {
+        None
+    };
+    Ok(PreparedFile { name, bytes, modified, converted })
 }
 
 /// Settings for the Split dialog.
@@ -260,10 +309,7 @@ impl Default for RotateDraft {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_named(path: &std::path::Path) -> Result<(String, Vec<u8>), (String, String)> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file.pdf".into());
-    match std::fs::read(path) {
-        Ok(bytes) => Ok((name, bytes)),
-        Err(e) => Err((name, e.to_string())),
-    }
+    std::fs::read(path).map(|bytes| (name.clone(), bytes)).map_err(|error| (name, error.to_string()))
 }
 
 impl PdfCraftApp {
@@ -275,43 +321,49 @@ impl PdfCraftApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn submit_combine_job(&mut self, mut job: CombineJob) {
-        if let Some(sender) = &self.combine_worker {
+    fn submit_file_job(&mut self, mut job: FileJob) {
+        if let Some(sender) = &self.file_import_worker {
             match sender.send(job) {
                 Ok(()) => return,
                 Err(std::sync::mpsc::SendError(returned)) => {
                     job = returned;
-                    self.combine_worker = None;
+                    self.file_import_worker = None;
                 }
             }
         }
-        let (tx, rx) = std::sync::mpsc::channel::<CombineJob>();
-        let spawned = std::thread::Builder::new().name("pdfcraft-combine-read".into()).spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel::<FileJob>();
+        let spawned = std::thread::Builder::new().name("pdfcraft-file-import".into()).spawn(move || {
             while let Ok(job) = rx.recv() {
-                let mut files = Vec::with_capacity(job.paths.len());
-                let mut modified = Vec::with_capacity(job.paths.len());
-                let mut converted = Vec::with_capacity(job.paths.len());
-                let mut error = None;
-                for path in job.paths {
-                    match read_named(&path) {
-                        Ok((name, bytes)) => {
-                            modified.push(std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok());
-                            let converted_pdf = if pdfcraft_platform::is_office_document(&name) {
-                                Some(pdfcraft_platform::office_to_pdf(&name, &bytes).map(Arc::new))
-                            } else {
-                                None
-                            };
-                            converted.push(converted_pdf);
-                            files.push((name, bytes));
-                        }
-                        Err(problem) => {
-                            error = Some(problem);
+                let mut request = job.request;
+                if request.purpose == FilePurpose::CreateMultiple {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::create_multiple_ui::build_create_multiple_output(
+                            &pdfcraft_engine::Session::new(),
+                            job.inputs.into_iter().map(prepare_file_input),
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(crate::create_multiple_ui::CreateMultipleFailure::Build(
+                            "file preparation failed unexpectedly in the background worker".into(),
+                        ))
+                    });
+                    request.create_multiple = Some(result);
+                } else if request.purpose == FilePurpose::Combine {
+                    let mut files = Vec::with_capacity(job.inputs.len());
+                    for input in job.inputs {
+                        let result = prepare_file_input(input);
+                        let failed_to_read = result.is_err();
+                        files.push(result);
+                        if failed_to_read {
                             break;
                         }
                     }
+                    request.files = files;
+                } else {
+                    request.files = job.inputs.into_iter().map(prepare_file_input).collect();
                 }
                 if let Ok(mut queue) = job.requests.lock() {
-                    queue.push(FileRequest { files, modified, error, converted, ..job.request });
+                    queue.push(request);
                     if let Some(ctx) = job.ctx {
                         ctx.request_repaint();
                     }
@@ -321,15 +373,24 @@ impl PdfCraftApp {
         match spawned {
             Ok(_) => {
                 if let Err(e) = tx.send(job) {
-                    self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
+                    self.notify_fmt("Couldn't start preparing files: {e}", &[("e", &e.to_string())]);
                 } else {
-                    self.combine_worker = Some(tx);
+                    self.file_import_worker = Some(tx);
                 }
             }
             Err(e) => {
-                self.notify_fmt("Couldn't start reading files for Combine: {e}", &[("e", &e.to_string())]);
+                self.notify_fmt("Couldn't start preparing files: {e}", &[("e", &e.to_string())]);
             }
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn queue_import(&mut self, purpose: FilePurpose, inputs: Vec<FileInput>, output_dir: Option<std::path::PathBuf>) {
+        let requests = self.requests.clone();
+        let ctx = self.ctx.clone();
+        let mut request = self.file_request(purpose, Vec::new());
+        request.output_dir = output_dir.clone();
+        self.submit_file_job(FileJob { inputs, request, requests, ctx });
     }
 
     /// Ask for files to add to the Combine files list (its Add files… button).
@@ -385,7 +446,7 @@ impl PdfCraftApp {
                 let handles = if multiple { dialog.pick_files().await.unwrap_or_default() } else { dialog.pick_file().await.into_iter().collect() };
                 let mut files = Vec::new();
                 for h in handles {
-                    files.push((h.file_name(), h.read().await));
+                    files.push(Ok(PreparedFile::unconverted(h.file_name(), h.read().await)));
                 }
                 if !files.is_empty()
                     && let Ok(mut q) = requests.lock()
@@ -403,29 +464,45 @@ impl PdfCraftApp {
     /// Read the picked files and use them.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn use_paths(&mut self, purpose: FilePurpose, paths: &[std::path::PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
         if purpose == FilePurpose::Combine {
-            if paths.is_empty() {
+            let inputs = paths.iter().cloned().map(FileInput::Path).collect::<Vec<_>>();
+            self.queue_import(purpose, inputs, None);
+            return;
+        }
+        let has_office = paths
+            .iter()
+            .any(|path| path.file_name().map(|name| name.to_string_lossy()).is_some_and(|name| pdfcraft_platform::is_office_document(&name)));
+        if has_office && matches!(purpose, FilePurpose::CreateMultiple | FilePurpose::CreateMultipleSeparate | FilePurpose::InsertPages) {
+            let inputs = paths.iter().cloned().map(FileInput::Path).collect::<Vec<_>>();
+            if purpose != FilePurpose::CreateMultipleSeparate {
+                self.queue_import(purpose, inputs, None);
                 return;
             }
-            let paths = paths.to_vec();
-            let requests = self.requests.clone();
-            let ctx = self.ctx.clone();
-            let request = self.file_request(purpose, Vec::new());
-            self.submit_combine_job(CombineJob { paths, request, requests, ctx });
-            return;
-        }
-        if purpose == FilePurpose::CreateMultiple {
-            // Each file is read when its turn comes, so the selection's bytes are not all held at once.
-            if !paths.is_empty() {
-                self.stage_create_multiple(paths.iter().map(|p| read_named(p)));
+            let queue = move |app: &mut Self, dir: std::path::PathBuf| app.queue_import(FilePurpose::CreateMultipleSeparate, inputs, Some(dir));
+            match self.export_dir_override.clone() {
+                Some(dir) => queue(self, std::path::PathBuf::from(dir)),
+                None => {
+                    self.ask_one(
+                        crate::pickers::Ask::Folder(rfd::AsyncFileDialog::new().set_title(tl!("Choose a folder for the exported files"))),
+                        None,
+                        queue,
+                    );
+                }
             }
             return;
         }
-        if purpose == FilePurpose::CreateMultipleSeparate {
-            if !paths.is_empty() {
+        match purpose {
+            FilePurpose::CreateMultiple => {
+                self.stage_create_multiple(paths.iter().map(|path| read_named(path)));
+                return;
+            }
+            FilePurpose::CreateMultipleSeparate => {
                 let paths = paths.to_vec();
                 let convert = move |app: &mut Self, dir: std::path::PathBuf| {
-                    app.stage_create_separate(paths.iter().map(|p| read_named(p)), Some(dir));
+                    app.stage_create_separate(paths.iter().map(|path| read_named(path)), Some(dir));
                 };
                 match self.export_dir_override.clone() {
                     Some(dir) => convert(self, std::path::PathBuf::from(dir)),
@@ -437,11 +514,15 @@ impl PdfCraftApp {
                         );
                     }
                 }
+                return;
             }
-            return;
+            FilePurpose::InsertPages => {
+                self.insert_each(paths.iter().map(|path| read_named(path)));
+                return;
+            }
+            _ => {}
         }
         let mut files = Vec::new();
-        let mut modified = Vec::new();
         for p in paths {
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file.pdf".into());
             if purpose == FilePurpose::RedactWords && std::fs::metadata(p).is_ok_and(|m| m.len() > crate::redact_ui::MAX_WORD_LIST_BYTES as u64) {
@@ -465,27 +546,8 @@ impl PdfCraftApp {
                     return;
                 }
             }
-            modified.push(std::fs::metadata(p).and_then(|m| m.modified()).ok());
         }
-        if files.is_empty() {
-            return;
-        }
-        // Combine files lists when each file was last modified.
-        if purpose == FilePurpose::Combine {
-            let incoming = files
-                .into_iter()
-                .zip(modified)
-                .map(|((name, bytes), modified)| crate::combine_ui::Incoming {
-                    name,
-                    bytes: Arc::new(bytes),
-                    converted: None,
-                    modified,
-                    note: None,
-                    open_doc: None,
-                })
-                .collect();
-            self.stage_combine_with(incoming);
-        } else {
+        if !files.is_empty() {
             self.use_files(purpose, files);
         }
     }
@@ -520,7 +582,7 @@ impl PdfCraftApp {
             if let Ok(bytes) = f.bytes_async().await
                 && let Ok(mut q) = requests.lock()
             {
-                q.push(FileRequest { files: vec![(name, bytes)], ..request });
+                q.push(FileRequest { files: vec![Ok(PreparedFile::unconverted(name, bytes))], ..request });
                 ctx.request_repaint();
             }
         });
@@ -531,7 +593,13 @@ impl PdfCraftApp {
     /// `requests` once the files are read; it is used on a later frame.
     pub fn file_request(&self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) -> FileRequest {
         let target = if purpose.edits_active_document() { self.pick_target(self.active_ids().map(|(_, id)| id)) } else { None };
-        FileRequest { purpose, target, files, modified: Vec::new(), error: None, converted: Vec::new() }
+        FileRequest {
+            purpose,
+            target,
+            files: files.into_iter().map(|(name, bytes)| Ok(PreparedFile::unconverted(name, bytes))).collect(),
+            output_dir: None,
+            create_multiple: None,
+        }
     }
 
     /// `doc` as it is now, for a pick that will edit it.
@@ -555,33 +623,38 @@ impl PdfCraftApp {
     /// Handle files picked asynchronously.
     pub(crate) fn process_file_requests(&mut self) {
         let pending: Vec<_> = self.requests.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
-        for FileRequest { purpose, target, files, modified, error, converted } in pending {
+        for FileRequest { purpose, target, files, output_dir, create_multiple, .. } in pending {
             if !self.still_pick_target(target) {
                 continue;
             }
-            if let Some((name, e)) = error {
-                self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &e)]);
-                continue;
-            }
             // Last-resort guard (AGENTS.md §4), as for desktop picks and commands.
-            let use_request = || {
-                if purpose == FilePurpose::Combine {
+            let use_request = || match purpose {
+                FilePurpose::Combine => {
+                    if let Some(Err((name, error))) = files.iter().find(|file| file.is_err()) {
+                        self.notify_fmt("Couldn't read {name}: {e}", &[("name", name), ("e", error)]);
+                        return;
+                    }
                     let incoming = files
                         .into_iter()
-                        .enumerate()
-                        .map(|(index, (name, bytes))| crate::combine_ui::Incoming {
-                            name,
-                            bytes: Arc::new(bytes),
-                            modified: modified.get(index).copied().flatten(),
+                        .filter_map(Result::ok)
+                        .map(|file| crate::combine_ui::Incoming {
+                            name: file.name,
+                            bytes: Arc::new(file.bytes),
+                            modified: file.modified,
                             note: None,
                             open_doc: None,
-                            converted: converted.get(index).cloned().flatten(),
+                            converted: file.converted,
                         })
                         .collect();
                     self.stage_combine_with(incoming);
-                } else {
-                    self.use_files(purpose, files);
                 }
+                FilePurpose::CreateMultiple => match create_multiple {
+                    Some(result) => self.finish_create_multiple(result),
+                    None => self.stage_create_multiple_prepared(files),
+                },
+                FilePurpose::CreateMultipleSeparate => self.stage_create_separate_prepared(files, output_dir),
+                FilePurpose::InsertPages => self.insert_prepared(files),
+                _ => self.use_files(purpose, files.into_iter().filter_map(Result::ok).map(|file| (file.name, file.bytes)).collect()),
             };
             if let Err(m) = pdfcraft_engine::guard(use_request) {
                 self.notify_fmt("That didn't work: an internal error stopped it ({m}).", &[("m", m.as_str())]);
@@ -591,6 +664,30 @@ impl PdfCraftApp {
 
     /// Use picked files (also the entry point for tests and automation).
     pub fn use_files(&mut self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(purpose, FilePurpose::Combine | FilePurpose::CreateMultiple | FilePurpose::CreateMultipleSeparate | FilePurpose::InsertPages)
+            && files.iter().any(|(name, _)| pdfcraft_platform::is_office_document(name))
+        {
+            let inputs = files.into_iter().map(|(name, bytes)| FileInput::Bytes(name, bytes)).collect();
+            if purpose != FilePurpose::CreateMultipleSeparate {
+                self.queue_import(purpose, inputs, None);
+                return;
+            }
+            let queue = move |app: &mut Self, dir: std::path::PathBuf| {
+                app.queue_import(FilePurpose::CreateMultipleSeparate, inputs, Some(dir));
+            };
+            match self.export_dir_override.clone() {
+                Some(dir) => queue(self, std::path::PathBuf::from(dir)),
+                None => {
+                    self.ask_one(
+                        crate::pickers::Ask::Folder(rfd::AsyncFileDialog::new().set_title(tl!("Choose a folder for the exported files"))),
+                        None,
+                        queue,
+                    );
+                }
+            }
+            return;
+        }
         match purpose {
             FilePurpose::TextFont { page } => {
                 let Some((_, bytes)) = files.into_iter().next() else { return };
@@ -684,6 +781,13 @@ impl PdfCraftApp {
     where
         I: IntoIterator<Item = Result<(String, Vec<u8>), (String, String)>>,
     {
+        self.insert_prepared(files.into_iter().map(|file| file.map(|(name, bytes)| PreparedFile::unconverted(name, bytes))));
+    }
+
+    pub(crate) fn insert_prepared<I>(&mut self, files: I)
+    where
+        I: IntoIterator<Item = FileResult>,
+    {
         let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) else { return };
         let (id, chosen) = (view.id, view.insert_at.take());
         let after = view.target_pages().last().map_or(0, |p| p + 1);
@@ -691,15 +795,21 @@ impl PdfCraftApp {
         let start = chosen.unwrap_or(after).min(count);
         let mut at = start;
         for file in files {
-            let (name, bytes) = match file {
+            let file = match file {
                 Ok(file) => file,
                 Err((name, error)) => {
                     self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &error)]);
                     continue;
                 }
             };
-            let converted =
-                self.session.convert_to_pdf(&name, &Arc::new(bytes)).and_then(|(_, pdf)| Ok((self.session.page_count_of(&name, &pdf)?, pdf)));
+            let name = file.name.clone();
+            let converted = match file.converted {
+                Some(Ok(pdf)) => Ok(pdf),
+                Some(Err(error)) => Err(error),
+                None if pdfcraft_engine::source_kind(&name, &file.bytes) == Some(pdfcraft_engine::SourceKind::Pdf) => Ok(Arc::new(file.bytes)),
+                None => crate::create_ui::convert_input_to_pdf(&self.session, &name, &file.bytes),
+            }
+            .and_then(|pdf| self.session.page_count_of(&name, &pdf).map(|pages| (pages, pdf)).map_err(|e| e.to_string()));
             match converted {
                 Ok((pages, bytes)) => {
                     if self.apply_edit(Edit::InsertPagesFrom {
@@ -712,7 +822,7 @@ impl PdfCraftApp {
                         at = at.saturating_add(pages);
                     }
                 }
-                Err(e) => self.notify_error(e),
+                Err(error) => self.notify_fmt("Couldn't insert {name}: {error}", &[("name", &name), ("error", &error)]),
             }
         }
         if at > start
@@ -1140,7 +1250,11 @@ impl PdfCraftApp {
 
 #[cfg(test)]
 mod stem_tests {
-    use super::{attachment_file_name, file_stem_from_user, is_plain_file_name};
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::FileInput;
+    use super::{FilePurpose, attachment_file_name, file_stem_from_user, is_plain_file_name};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::Arc;
 
     #[test]
     fn user_file_names_stay_inside_the_folder_and_writable_everywhere() {
@@ -1192,6 +1306,113 @@ mod stem_tests {
             let once = attachment_file_name(name);
             assert_eq!(attachment_file_name(&once), once);
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn office_bytes_are_converted_but_pdf_bytes_with_office_names_are_not() {
+        let converted_pdf = Arc::new(pdfcraft_engine::Session::new().create_blank(200.0, 300.0, 1).unwrap().as_ref().clone());
+        let office_called = std::cell::Cell::new(false);
+        let office = super::prepare_file_input_with(FileInput::Bytes("slides.PPTX".into(), b"synthetic Office source".to_vec()), |name, bytes| {
+            office_called.set(true);
+            assert_eq!(name, "slides.PPTX");
+            assert_eq!(bytes, b"synthetic Office source");
+            Ok(converted_pdf.clone())
+        })
+        .unwrap();
+        assert!(office_called.get());
+        assert!(matches!(office.converted, Some(Ok(ref pdf)) if Arc::ptr_eq(pdf, &converted_pdf)));
+
+        office_called.set(false);
+        let source_pdf = pdfcraft_engine::Session::new().create_blank(200.0, 300.0, 1).unwrap();
+        let mut pdf_bytes = b"prefix before the PDF header\n".to_vec();
+        pdf_bytes.extend_from_slice(source_pdf.as_slice());
+        let pdf = super::prepare_file_input_with(FileInput::Bytes("named.docx".into(), pdf_bytes), |_, _| {
+            office_called.set(true);
+            Err("the Office converter must not receive PDF bytes".into())
+        })
+        .unwrap();
+        assert!(!office_called.get());
+        assert!(pdf.converted.is_none());
+    }
+
+    #[test]
+    fn insert_pages_uses_prepared_office_pdf_bytes() {
+        let mut app = crate::PdfCraftApp::new();
+        let target = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        app.open_bytes("target.pdf", None, target.as_ref().clone()).unwrap();
+        let inserted = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        app.insert_prepared(vec![Ok(super::PreparedFile {
+            name: "slides.pptx".into(),
+            bytes: b"synthetic Office source".to_vec(),
+            modified: None,
+            converted: Some(Ok(inserted)),
+        })]);
+        let id = app.views[0].id;
+        assert_eq!(app.session.get(id).unwrap().info.pages.len(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn combine_paths_are_read_on_worker_and_staged_in_selection_order() {
+        let mut app = crate::PdfCraftApp::new();
+        let pdf = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        let dir = std::env::temp_dir().join(format!("pdfcraft-file-import-{}-{}", std::process::id(), pdf.len()));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first.docx");
+        let second = dir.join("second.docx");
+        std::fs::write(&first, pdf.as_slice()).unwrap();
+        std::fs::write(&second, pdf.as_slice()).unwrap();
+
+        app.add_paths_to_combine(&[first.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()]);
+        assert!(app.combine_draft.is_empty(), "the caller returns without staging file reads on the frame thread");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if app.requests.lock().map(|requests| !requests.is_empty()).unwrap_or(false) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "background import did not complete");
+            std::thread::yield_now();
+        }
+        app.process_file_requests();
+        assert_eq!(app.combine_draft.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(), ["first.docx", "second.docx"]);
+        assert!(app.combine_draft.iter().all(|file| file.pages == 1));
+
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn create_multiple_paths_are_combined_by_the_worker_in_selection_order() {
+        let mut app = crate::PdfCraftApp::new();
+        let first_pdf = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        let second_pdf = app.session.create_blank(200.0, 300.0, 2).unwrap();
+        let dir = std::env::temp_dir().join(format!("pdfcraft-create-multiple-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first.docx");
+        let second = dir.join("second.docx");
+        std::fs::write(&first, first_pdf.as_slice()).unwrap();
+        std::fs::write(&second, second_pdf.as_slice()).unwrap();
+
+        app.queue_import(FilePurpose::CreateMultiple, vec![FileInput::Path(first), FileInput::Path(second)], None);
+        assert!(app.views.is_empty(), "conversion and combination stay off the frame thread");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if app.requests.lock().map(|requests| !requests.is_empty()).unwrap_or(false) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "background import did not complete");
+            std::thread::yield_now();
+        }
+        app.process_file_requests();
+        assert_eq!(app.views.len(), 1);
+        let doc = app.session.get(app.views[0].id).unwrap();
+        assert_eq!(doc.name, "Combined.pdf");
+        assert_eq!(doc.info.pages.len(), 3);
+
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

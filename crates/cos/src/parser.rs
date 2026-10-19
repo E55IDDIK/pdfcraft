@@ -337,11 +337,14 @@ impl<'a> Lexer<'a> {
             }
             return Ok(Object::Real(0.0));
         }
-        match s.trim_start_matches('+').parse::<i64>() {
+        // Tolerate a doubled sign ("--280") like the real branch does.
+        let t = s.trim_start_matches('+');
+        let cleaned = t.strip_prefix('-').filter(|r| r.starts_with('-')).unwrap_or(t);
+        match cleaned.parse::<i64>() {
             Ok(v) => Ok(Object::Int(v)),
             Err(_) => {
                 // Out-of-range integers are treated as reals (§7.3.3 allows implementation limits).
-                s.parse::<f64>().map(Object::Real).map_err(|_| CosError::Syntax { offset: start, detail: format!("bad number {s:?}") })
+                cleaned.parse::<f64>().map(Object::Real).map_err(|_| CosError::Syntax { offset: start, detail: format!("bad number {s:?}") })
             }
         }
     }
@@ -473,6 +476,20 @@ mod tests {
 
     fn obj(s: &str) -> Object {
         Lexer::new(s.as_bytes(), 0).object().unwrap_or_else(|e| panic!("{s}: {e}"))
+    }
+
+    #[test]
+    fn doubled_sign_integer_reads_like_the_real_form() {
+        // Some writers emit a TJ kerning as "--280"; the real form "--280.0" is already read.
+        assert_eq!(obj("--280.0"), Object::Real(-280.0));
+        assert_eq!(obj("--280"), Object::Int(-280));
+        match obj("[(Hello) --280 (World)]") {
+            Object::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[1], Object::Int(-280));
+            }
+            other => panic!("not an array: {other:?}"),
+        }
     }
 
     #[test]

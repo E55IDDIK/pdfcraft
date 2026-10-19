@@ -8,7 +8,8 @@
 //! `/PCMark` entry (also in the stream dictionary) names the kind of mark, which is how Update and
 //! Remove find them again without decompressing page content. When
 //! anything is drawn on top, the page's original content is wrapped in `q … Q` (two tiny streams)
-//! so its graphics state can't leak into the mark.
+//! so its graphics state cannot reach the mark. The closing stream also ends known unfinished
+//! marked-content sequences before the new mark.
 //!
 //! Text uses standard Helvetica (WinAnsi) added to the page resources as `/PCHelv`.
 
@@ -332,12 +333,16 @@ const WRAP_OPEN: &[u8] = b"q %PdfCraft\n";
 const WRAP_CLOSE: &[u8] = b"\nQ %PdfCraft\n";
 const OLD_WRAP_CLOSE: &[u8] = b"Q %PdfCraft\n";
 
-/// Whether `bytes` are a wrapper's close: [`WRAP_CLOSE`] after a `Q` for each `q` the wrapped
-/// content left open, or [`OLD_WRAP_CLOSE`].
+/// Whether `bytes` are a wrapper's close: canonical `EMC` closures, then the existing
+/// graphics closures. Legacy closes without the leading newline remain valid on their own.
 fn is_wrap_close(bytes: &[u8]) -> bool {
     let mut rest = bytes;
+    while let Some(shorter) = rest.strip_prefix(b"\nEMC".as_slice()) {
+        rest = shorter;
+    }
+    let legacy = rest.len() == bytes.len();
     loop {
-        if rest == WRAP_CLOSE || rest == OLD_WRAP_CLOSE {
+        if rest == WRAP_CLOSE || (legacy && rest == OLD_WRAP_CLOSE) {
             return true;
         }
         match rest.strip_prefix(b"\nQ".as_slice()) {
@@ -387,11 +392,13 @@ enum Isolation {
     /// `suffix`: the stream from which the content leaves graphics state set (or a comment open)
     /// that a mark on top must not inherit, so it needs a wrapper from there to the end.
     /// `wrappers`: PdfCraft wrapper pairs (open, close) as stream indexes.
-    Clean { suffix: Option<usize>, wrappers: Vec<(usize, usize)> },
+    /// `marked`: unfinished marked-content sequences to close before a new mark.
+    Clean { suffix: Option<usize>, wrappers: Vec<(usize, usize)>, marked: usize },
     /// The content could not be read that precisely (it doesn't decode, is too large, or has
     /// stray bytes, unbalanced `q`/`Q` or an unfinished text object or path). `unclosed` is
-    /// the count of `q` left open at the end, when known.
-    Unknown { unclosed: usize },
+    /// the count of `q` left open at the end, when known. `marked` counts known unfinished
+    /// marked-content sequences independently of graphics malformation, or zero when unknown.
+    Unknown { unclosed: usize, marked: usize },
 }
 
 const ISOLATION_MAX_STREAMS: usize = 100_000;
@@ -400,7 +407,7 @@ const ISOLATION_MAX_OPS: usize = 1_000_000;
 const ISOLATION_MAX_DEPTH: usize = 10_000;
 
 fn isolation(doc: &Document, list: &[Object]) -> Isolation {
-    let unknown = Isolation::Unknown { unclosed: 0 };
+    let unknown = Isolation::Unknown { unclosed: 0, marked: 0 };
     if list.len() > ISOLATION_MAX_STREAMS {
         return unknown;
     }
@@ -422,14 +429,17 @@ fn isolation(doc: &Document, list: &[Object]) -> Isolation {
     let edges = pieces.comment_edges(&parsed);
     let (mut text_open, mut path_open, mut dirty, mut malformed) = (false, false, false, false);
     let mut stack: Vec<usize> = Vec::new();
+    let (mut marked, mut marked_known) = (0usize, true);
     let mut split = 0;
     let mut previous_last = None;
     let mut wrappers = Vec::new();
     for op in &parsed.ops {
         let (first, last) = pieces.pieces_of(op);
-        // A wrapper can only go in before a whole stream, at the top level, between operators,
-        // and where no comment runs into the stream (it would swallow the wrapper's `q`).
+        // A wrapper can only go in before a whole stream, outside graphics and marked-content
+        // scopes, between operators, where no comment would swallow the wrapper's `q`.
         if stack.is_empty()
+            && marked_known
+            && marked == 0
             && !text_open
             && !path_open
             && !dirty
@@ -439,6 +449,26 @@ fn isolation(doc: &Document, list: &[Object]) -> Isolation {
             split = first;
         }
         previous_last = Some(last);
+        // Match the reader's tolerant operands: BMC uses the last name, BDC the last
+        // name/object pair, and EMC ignores surplus operands. Invalid begins are ignored.
+        let begin_marked = match op.op.as_slice() {
+            b"BMC" => op.operands.last().is_some_and(|o| matches!(o, Object::Name(_))),
+            b"BDC" => op.operands.len().checked_sub(2).and_then(|i| op.operands.get(i)).is_some_and(|o| matches!(o, Object::Name(_))),
+            _ => false,
+        };
+        if marked_known {
+            if begin_marked {
+                if marked < ISOLATION_MAX_DEPTH {
+                    marked += 1;
+                } else {
+                    // Once the budget is exceeded, later EMCs cannot restore a known depth.
+                    marked_known = false;
+                    marked = 0;
+                }
+            } else if op.is("EMC") {
+                marked = marked.saturating_sub(1);
+            }
+        }
         match op.op.as_slice() {
             b"BT" if !text_open => text_open = true,
             b"ET" if text_open => text_open = false,
@@ -468,11 +498,11 @@ fn isolation(doc: &Document, list: &[Object]) -> Isolation {
             _ => {}
         }
     }
-    if malformed || text_open || path_open || !stack.is_empty() {
-        return Isolation::Unknown { unclosed: if malformed { 0 } else { stack.len() } };
+    if malformed || text_open || path_open || !stack.is_empty() || !marked_known {
+        return Isolation::Unknown { unclosed: if malformed { 0 } else { stack.len() }, marked };
     }
     let comment_open = edges.last().is_some_and(|edge| edge.1);
-    Isolation::Clean { suffix: (dirty || comment_open).then_some(split), wrappers }
+    Isolation::Clean { suffix: (dirty || comment_open || marked != 0).then_some(split), wrappers, marked }
 }
 
 /// Put a mark's content on a page: behind (prepended) or on top (appended, after wrapping the
@@ -484,21 +514,22 @@ fn place(doc: &mut Document, page: &pdfcraft_model::Page, kind: MarkKind, conten
 /// Put content on a page, tagged `tag` (see [`place`]). On top, whatever graphics state the
 /// content before leaves set (a `cm`, a clip, text state…) must not reach the mark, including
 /// content appended after an earlier PdfCraft wrapper by another tool (#3084): the stretch of
-/// content that leaves state set is wrapped in q/Q, once.
+/// content that leaves state set is wrapped in q/Q, once. Any known unfinished marked-content
+/// sequences are closed at the end too, so hidden optional content cannot hide the new mark.
 fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, content: Vec<u8>, behind: bool) -> Result<(), EditError> {
     let mut list = contents(doc, page)?;
     let wrap = if behind {
         None
     } else {
         match isolation(doc, &list) {
-            Isolation::Clean { suffix, .. } => suffix.map(|split| (split, 0)),
+            Isolation::Clean { suffix, marked, .. } => suffix.map(|split| (split, 0, marked)),
             // Content that can't be read precisely is wrapped whole, as before: after the
             // behind-marks at the start. A `q` it leaves open is closed at its end, where
             // closing it changes nothing already drawn.
-            Isolation::Unknown { unclosed } => {
+            Isolation::Unknown { unclosed, marked } => {
                 let behind_kinds = [MarkKind::Background.tag(), MarkKind::Watermark.tag()];
                 let split = list.iter().position(|o| !stream_tag(doc, o).is_some_and(|t| behind_kinds.contains(&t.as_str()))).unwrap_or(list.len());
-                (split < list.len()).then_some((split, unclosed))
+                (split < list.len()).then_some((split, unclosed, marked))
             }
         }
     };
@@ -506,8 +537,9 @@ fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, cont
     if behind {
         list.insert(0, mark);
     } else {
-        if let Some((split, unclosed)) = wrap {
-            let mut close_bytes = b"\nQ".repeat(unclosed);
+        if let Some((split, unclosed, marked)) = wrap {
+            let mut close_bytes = b"\nEMC".repeat(marked);
+            close_bytes.extend_from_slice(&b"\nQ".repeat(unclosed));
             close_bytes.extend_from_slice(WRAP_CLOSE);
             let open = Object::Ref(doc.add(Object::Stream(Stream::from_raw(tagged("Wrap"), WRAP_OPEN.to_vec()))));
             let close = Object::Ref(doc.add(Object::Stream(Stream::from_raw(tagged("Wrap"), close_bytes))));
@@ -836,5 +868,7 @@ pub use added::{
     update_content,
 };
 
+#[cfg(test)]
+mod marked_isolation_tests;
 #[cfg(test)]
 mod tests;

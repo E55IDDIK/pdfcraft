@@ -87,6 +87,108 @@ fn ap(doc: &Document, w: &Widget) -> String {
     String::from_utf8_lossy(&s.decoded().unwrap()).into_owned()
 }
 
+#[test]
+fn button_caption_preserves_other_widgets_and_shared_dictionaries() {
+    for indirect_caption in [false, true] {
+        let mut doc = one_page();
+        let a = add_field(&mut doc, 0, [40.0, 600.0, 200.0, 630.0], &NewField::Button { caption: "Original".into() }, Some("first")).unwrap();
+        let b = add_field(&mut doc, 0, [40.0, 500.0, 200.0, 530.0], &NewField::Button { caption: "Original".into() }, Some("second")).unwrap();
+        let all = fields(&doc);
+        let (first, second) = (field(&all, &a).obj, field(&all, &b).obj);
+        let mut parent = Dict::new();
+        parent.set(b"FT".to_vec(), Object::name("Btn"));
+        parent.set(b"Ff".to_vec(), Object::Int(flags::PUSH_BUTTON as i64));
+        parent.set(b"T".to_vec(), PdfString::text("clear_button"));
+        parent.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(first), Object::Ref(second)]));
+        let mut action = Dict::new();
+        action.set(b"S".to_vec(), Object::name("ResetForm"));
+        parent.set(b"A".to_vec(), Object::Dict(action.clone()));
+        let parent = doc.add(parent);
+        let mut mk = Dict::new();
+        let ca = Object::String(PdfString::text("Original"));
+        let ca = if indirect_caption { Object::Ref(doc.add(ca)) } else { ca };
+        mk.set(b"CA".to_vec(), ca);
+        mk.set(b"TP".to_vec(), Object::Int(0));
+        mk.set(b"R".to_vec(), Object::Int(90));
+        mk.set(b"VendorNote".to_vec(), PdfString::text("kept"));
+        let mk = doc.add(mk);
+        let mut shared_ap = doc.get(first).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().clone();
+        let normal = shared_ap.get(b"N").unwrap().clone();
+        shared_ap.set(b"R".to_vec(), normal.clone());
+        shared_ap.set(b"D".to_vec(), normal);
+        shared_ap.set(b"VendorAP".to_vec(), PdfString::text("kept"));
+        let shared_ap = doc.add(shared_ap);
+        for widget in [first, second] {
+            doc.update_dict(widget, |d| {
+                for key in [b"FT".as_slice(), b"Ff", b"T"] {
+                    d.remove(key);
+                }
+                d.set(b"Parent".to_vec(), Object::Ref(parent));
+                d.set(b"MK".to_vec(), Object::Ref(mk));
+                d.set(b"AP".to_vec(), Object::Ref(shared_ap));
+            })
+            .unwrap();
+        }
+        let af = doc.get(doc.root().unwrap()).as_dict().unwrap().reference(b"AcroForm").unwrap();
+        doc.update_dict(af, |d| d.set(b"Fields".to_vec(), Object::Array(vec![Object::Ref(parent)]))).unwrap();
+        let original = pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap();
+        let original = Document::open(Arc::new(original)).unwrap();
+        // Full saves can renumber objects: reacquire references from the reopened model.
+        let f = field(&fields(&original), "clear_button").clone();
+        let first = f.widgets[0].obj;
+        let mk = original.get(first).as_dict().unwrap().reference(b"MK").unwrap();
+        for full in [false, true] {
+            let mut doc = original.clone();
+            let untouched = doc.get(first).clone();
+            let shared_mk = doc.get(mk).clone();
+            assert_eq!(field(&fields(&doc), "clear_button").widgets[1].caption.as_deref(), Some("Original"));
+            set_props(&mut doc, "clear_button", &FieldProps { caption: Some((1, "Clear Form".into())), ..Default::default() }).unwrap();
+            assert_eq!(doc.get(first), untouched, "the other widget and all its appearances are untouched");
+            assert_eq!(doc.get(mk), shared_mk, "shared MK is not patched in place");
+            let bytes = if full {
+                pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap()
+            } else {
+                let bytes = write_incremental(&doc, &SaveOptions::default()).unwrap();
+                assert!(bytes.starts_with(original.bytes().as_slice()));
+                assert!(bytes.len() > original.bytes().len());
+                bytes
+            };
+            let doc = Document::open(Arc::new(bytes)).unwrap();
+            let f = field(&fields(&doc), "clear_button").clone();
+            assert_eq!(f.widgets.iter().map(|w| w.caption.as_deref()).collect::<Vec<_>>(), [Some("Original"), Some("Clear Form")]);
+            assert_eq!(f.button, Some(af::ButtonAction::Reset { fields: Vec::new(), exclude: false }));
+            assert_eq!(doc.get(f.obj).as_dict().unwrap().get(b"A"), Some(&Object::Dict(action.clone())));
+            let w = doc.get(f.widgets[1].obj);
+            let mk = w.as_dict().unwrap().get(b"MK").unwrap().as_dict().unwrap();
+            assert_eq!(mk.get(b"VendorNote").unwrap().as_string().unwrap().to_text(), "kept");
+            assert_eq!(mk.get(b"R").unwrap().as_int(), Some(90));
+            assert_eq!(mk.get(b"TP").unwrap().as_int(), Some(0));
+            let apd = w.as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap();
+            assert!(apd.contains(b"VendorAP"));
+            assert!(!apd.contains(b"R") && !apd.contains(b"D"), "stale hover/pressed text must not survive");
+            assert!(ap(&doc, &f.widgets[1]).contains("(Clear Form) Tj"));
+        }
+    }
+}
+
+#[test]
+fn button_caption_rejects_wrong_type_and_index_before_mutation() {
+    let mut doc = fixture();
+    for (name, wi) in [("name", 0), ("agree", 0), ("go", usize::MAX)] {
+        let before = pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap();
+        let props = FieldProps { caption: Some((wi, "Clear Form".into())), name: Some("renamed".into()), ..Default::default() };
+        assert!(set_props(&mut doc, name, &props).is_err());
+        assert_eq!(pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap(), before);
+    }
+    set_props(&mut doc, "go", &FieldProps { caption: Some((0, "提交".into())), ..Default::default() }).unwrap();
+    assert_eq!(field(&fields(&doc), "go").widgets[0].caption.as_deref(), Some("提交"));
+    assert_eq!(undrawn_fields(&doc), [("go".to_string(), '提')]);
+    set_props(&mut doc, "go", &FieldProps { caption: Some((0, String::new())), ..Default::default() }).unwrap();
+    assert_eq!(field(&fields(&doc), "go").widgets[0].caption.as_deref(), Some(""));
+    assert!(undrawn_fields(&doc).is_empty());
+    assert!(!ap(&doc, &field(&fields(&doc), "go").widgets[0]).contains(" Tj"));
+}
+
 /// Read the drawn strings together with the appearance's actual font after saving and reopening.
 fn appearance_text(doc: &Document, w: &Widget, font_name: &[u8]) -> (Object, Vec<Vec<u8>>) {
     let widget = doc.get(w.obj);

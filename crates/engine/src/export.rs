@@ -93,14 +93,14 @@ impl Exporter {
         encode_png(r.width, r.height, &r.rgba)
     }
 
-    /// Page `page` as an image file of `format`.
+    /// Page `page` as an image file of `format`, which says the resolution it was drawn at.
     pub fn image(&mut self, page: usize, dpi: f64, format: ImageFormat) -> Result<Vec<u8>, String> {
         self.check(page)?;
         let r = self.renderer.render(RenderRequest { page, scale: (dpi.clamp(18.0, 1200.0) / 72.0) as f32, ..Default::default() });
         if let Some(e) = r.error {
             return Err(format!("page {}: {e}", page + 1));
         }
-        encode_image(r.width, r.height, &r.rgba, format)
+        encode_image(r.width, r.height, &r.rgba, format, self.dpi_used(page, dpi))
     }
 
     /// The reading-order text of a page.
@@ -127,12 +127,14 @@ impl Exporter {
     }
 }
 
-/// Premultiplied RGBA → an image file of `format`.
-pub fn encode_image(width: u32, height: u32, premultiplied: &[u8], format: ImageFormat) -> Result<Vec<u8>, String> {
+/// Premultiplied RGBA → an image file of `format`. A JPEG or TIFF says it is `dpi` dots per inch,
+/// so other programs show and print it at the page's size. A PNG says nothing: its `pHYs` counts
+/// pixels per metre, so 72 dpi would read back as 72.009 and a page made from it would shrink.
+pub fn encode_image(width: u32, height: u32, premultiplied: &[u8], format: ImageFormat, dpi: f64) -> Result<Vec<u8>, String> {
     match format {
         ImageFormat::Png => encode_png(width, height, premultiplied),
-        ImageFormat::Jpeg { quality } => encode_jpeg(width, height, premultiplied, quality),
-        ImageFormat::Tiff => encode_tiff(width, height, premultiplied),
+        ImageFormat::Jpeg { quality } => encode_jpeg(width, height, premultiplied, quality, dpi),
+        ImageFormat::Tiff => encode_tiff(width, height, premultiplied, dpi),
     }
 }
 
@@ -199,23 +201,37 @@ fn over_white(premultiplied: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// Premultiplied RGBA → baseline JPEG (pages are opaque: transparency becomes white paper).
-pub fn encode_jpeg(width: u32, height: u32, premultiplied: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+/// Premultiplied RGBA → baseline JPEG at `dpi` (pages are opaque: transparency becomes white paper).
+pub fn encode_jpeg(width: u32, height: u32, premultiplied: &[u8], quality: u8, dpi: f64) -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
+    use image::codecs::jpeg::{JpegEncoder, PixelDensity};
     let rgb = over_white(premultiplied);
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
-        .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)
-        .map_err(|e| e.to_string())?;
+    let mut enc = JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100));
+    // The JFIF density is whole dots per inch.
+    enc.set_pixel_density(PixelDensity::dpi(dpi.round() as u16));
+    enc.write_image(&rgb, width, height, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
-/// Premultiplied RGBA → TIFF (RGB, LZW-compressed by the encoder's default).
-pub fn encode_tiff(width: u32, height: u32, premultiplied: &[u8]) -> Result<Vec<u8>, String> {
-    use image::ImageEncoder;
+/// Premultiplied RGBA → TIFF (RGB, LZW-compressed) at `dpi`. Written with `tiff` directly:
+/// `image`'s `TiffEncoder` always says 1 × 1 with no unit and leaves the strips uncompressed.
+/// No predictor: LZW alone is the compression TIFF readers support most widely after none.
+pub fn encode_tiff(width: u32, height: u32, premultiplied: &[u8], dpi: f64) -> Result<Vec<u8>, String> {
+    use tiff::encoder::{Compression, Rational, TiffEncoder, colortype::RGB8};
+    use tiff::tags::{ResolutionUnit, Tag};
+    let err = |e: tiff::TiffError| e.to_string();
     let rgb = over_white(premultiplied);
     let mut out = std::io::Cursor::new(Vec::new());
-    image::codecs::tiff::TiffEncoder::new(&mut out).write_image(&rgb, width, height, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    let mut tiff = TiffEncoder::new(&mut out).map_err(err)?.with_compression(Compression::Lzw);
+    let mut image = tiff.new_image::<RGB8>(width, height).map_err(err)?;
+    // In hundredths: a page drawn at a lowered resolution (`Exporter::dpi_used`) is rarely a whole number.
+    let resolution = Rational { n: (dpi * 100.0).round() as u32, d: 100 };
+    let tags = image.encoder();
+    tags.write_tag(Tag::ResolutionUnit, ResolutionUnit::Inch).map_err(err)?;
+    tags.write_tag(Tag::XResolution, resolution.clone()).map_err(err)?;
+    tags.write_tag(Tag::YResolution, resolution).map_err(err)?;
+    image.write_data(&rgb).map_err(err)?;
     Ok(out.into_inner())
 }
 

@@ -169,6 +169,22 @@ fn a_replace_text_pair_survives_an_xfdf_round_trip() {
 }
 
 #[test]
+fn xml_exports_drop_xml_noncharacters() {
+    let mut src = filled();
+    set_value(&mut src, "Name", &FieldValue::Text("a\u{FFFE}b\u{FFFF}c".into())).unwrap();
+    let xfdf = export_xfdf(&src, false, true, "f.pdf");
+    let doc = roxmltree::Document::parse(&xfdf).unwrap_or_else(|e| panic!("XFDF is not well-formed: {e}: {xfdf:?}"));
+    let value = doc
+        .descendants()
+        .find(|n| n.has_tag_name("field") && n.attribute("name") == Some("Name"))
+        .and_then(|n| n.children().find(|c| c.has_tag_name("value")))
+        .and_then(|n| n.text());
+    assert_eq!(value, Some("abc"));
+    let data = export_data(&src, Format::Xml);
+    roxmltree::Document::parse(&data).unwrap_or_else(|e| panic!("XML is not well-formed: {e}: {data:?}"));
+}
+
+#[test]
 fn xml_exports_preserve_whitespace_in_field_names() {
     let names = ["Line\nName", "Line\tName", "Line\rName", "Line\r\nName", "\t Leading\nTrailing \t", "Line Name"];
     let value = "value\twith\nlines\r\nand <XML> & \"quotes\"";

@@ -734,6 +734,7 @@ pub struct FieldDraft {
     pub tab: FieldTab,
     pub name: String,
     pub tooltip: String,
+    pub caption: String,
     pub read_only: bool,
     pub required: bool,
     pub multiline: bool,
@@ -805,6 +806,7 @@ impl FieldDraft {
             tab: FieldTab::General,
             name: f.name.rsplit('.').next().unwrap_or(&f.name).to_string(),
             tooltip: f.tooltip.clone().unwrap_or_default(),
+            caption: f.widgets.get(widget).and_then(|w| w.caption.clone()).unwrap_or_default(),
             read_only: f.read_only(),
             required: f.has(pdfcraft_engine::field_flags::REQUIRED),
             multiline: f.has(pdfcraft_engine::field_flags::MULTILINE),
@@ -848,7 +850,7 @@ impl FieldDraft {
 
     fn tabs(&self) -> Vec<(FieldTab, &'static str)> {
         let mut t = vec![(FieldTab::General, "General"), (FieldTab::Appearance, "Appearance"), (FieldTab::Position, "Position")];
-        if !matches!(self.kind, FormFieldKind::PushButton | FormFieldKind::Signature) {
+        if self.kind != FormFieldKind::Signature {
             t.push((FieldTab::Options, "Options"));
         }
         if matches!(self.kind, FormFieldKind::Text | FormFieldKind::Combo) {
@@ -865,6 +867,7 @@ impl FieldDraft {
         let p = FieldProps {
             name: (self.name.trim() != o.name).then(|| self.name.trim().to_string()),
             tooltip: (self.tooltip != o.tooltip).then(|| self.tooltip.clone()),
+            caption: (self.caption != o.caption).then(|| (self.widget, self.caption.clone())),
             read_only: ch(self.read_only, o.read_only),
             required: ch(self.required, o.required),
             multiline: ch(self.multiline, o.multiline),
@@ -1087,6 +1090,12 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
             FieldTab::Calculate => calculate_tab(ui, d, t),
             FieldTab::Actions => actions_tab(ui, d, t),
             FieldTab::Options => match d.kind {
+                FormFieldKind::PushButton => {
+                    ui.horizontal(|ui| {
+                        let l = ui.label(tl!("Label"));
+                        ui.add(crate::widgets::line(&mut d.caption).desired_width(340.0)).labelled_by(l.id);
+                    });
+                }
                 FormFieldKind::Text => {
                     use pdfcraft_engine::field_flags as ff;
                     egui::Grid::new("text-options").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {

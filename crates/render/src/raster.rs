@@ -3631,6 +3631,46 @@ endstream endobj
         }
     }
 
+    /// #3308: a fax image whose `/Rows` says fewer rows than its `/Height` (a plotter driver wrote
+    /// `/Rows` equal to `/Columns`) is decoded to its height: only the first `/Rows` rows were
+    /// decoded and the rest drawn black, as MuPDF and Acrobat don't. `/BlackIs1` turns the fixture
+    /// white, so rows left undecoded show as black. Also through an `/Indexed` colour space, the
+    /// filter's other output path.
+    #[test]
+    fn group4_fax_with_rows_below_its_height_decodes_to_the_image_height() {
+        const ALL_BLACK_8X4: [u8; 6] = [0x26, 0xa2, 0xfe, 0x00, 0x20, 0x02];
+        for (space, rows) in [("/DeviceGray", "/Rows 2"), ("[/Indexed /DeviceRGB 1 <000000FFFFFF>]", "/Rows 2"), ("/DeviceGray", "/Rows 4")] {
+            let content = "q 20 0 0 20 5 5 cm /Im1 Do Q";
+            let mut pdf = format!(
+                "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >> endobj
+4 0 obj << /Length {} >> stream
+{content}
+endstream endobj
+5 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 4 /ColorSpace {space} /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8 {rows} /BlackIs1 true >> /Length {} >> stream
+",
+                content.len(),
+                ALL_BLACK_8X4.len()
+            )
+            .into_bytes();
+            pdf.extend_from_slice(&ALL_BLACK_8X4);
+            pdf.extend_from_slice(
+                b"
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF",
+            );
+            let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+            let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() });
+            assert!(page.error.is_none(), "{space} {rows}: {:?}", page.error);
+            for y in [17, 22, 27, 32] {
+                assert_eq!(&page.rgba[((y * 40 + 15) * 4)..][..4], &[255, 255, 255, 255], "{space} {rows}: image row at y {y} is decoded");
+            }
+        }
+    }
+
     #[test]
     fn tiff_predictor_packed_rgb_rows_keep_their_byte_boundaries() {
         use hayro_syntax::object::{FromBytes, Object};

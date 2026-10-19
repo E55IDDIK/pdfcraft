@@ -1473,6 +1473,65 @@ fn skia_subset_page() -> Document {
     doc
 }
 
+/// #2616: a subset whose ToUnicode has no space (as LaTeX and Sphinx output often has, spacing
+/// words with TJ kerning) makes finding the space width read every font on the page. That ran
+/// for every character of a multi-row draft, so each keystroke in a long paragraph took half a
+/// second. It runs once per font now, however long the paragraph.
+#[test]
+fn a_long_draft_in_a_font_without_a_space_works_out_the_space_width_once() {
+    // Two rows of one paragraph (14 pt apart) in the Chrome-style subset of `skia_subset_page`,
+    // whose ToUnicode here has no entry for the space glyph.
+    let mut doc =
+        text_page("BT /F3 12 Tf 72 700 Td <0177031602E001FB03050255> Tj ET          BT /F3 12 Tf 72 686 Td <008D0266035402FE01FB030503E6> Tj ET");
+    let program = doc.add(Object::Stream(Stream::flate(Dict::new(), include_bytes!("../../../assets/fonts/Inter-Regular.ttf"))));
+    let unicode = doc.add(Object::Stream(Stream::flate(
+        Dict::new(),
+        b"1 begincodespacerange <0000> <FFFF> endcodespacerange 12 beginbfchar <0177> <0050> <0316> <006F> <02E0> <006C>           <01FB> <0061> <0305> <006E> <0255> <0064> <008D> <0047> <0266> <0065> <0354> <0072> <02FE> <006D> <03E6> <0079>           <1000> <007A> endbfchar",
+    )));
+    let widths: Vec<Object> =
+        [(0x8D, 746), (0x177, 639), (0x1FB, 551), (0x255, 612), (0x266, 583), (0x2E0, 242), (0x2FE, 876), (0x305, 591), (0x316, 600)]
+            .into_iter()
+            .chain([(0x354, 376), (0x3E6, 515)])
+            .flat_map(|(cid, width)| [Object::Int(cid), Object::Array(vec![Object::Int(width)])])
+            .collect();
+    let descriptor = Dict::from_iter([
+        (b"Type".to_vec(), Object::name("FontDescriptor")),
+        (b"FontName".to_vec(), Object::name("BAAAAA+SampleSans")),
+        (b"Flags".to_vec(), Object::Int(32)),
+        (b"FontFile2".to_vec(), Object::Ref(program)),
+    ]);
+    let cid_font = Dict::from_iter([
+        (b"Type".to_vec(), Object::name("Font")),
+        (b"Subtype".to_vec(), Object::name("CIDFontType2")),
+        (b"BaseFont".to_vec(), Object::name("BAAAAA+SampleSans")),
+        (b"CIDToGIDMap".to_vec(), Object::name("Identity")),
+        (b"DW".to_vec(), Object::Int(562)),
+        (b"W".to_vec(), Object::Array(widths)),
+        (b"FontDescriptor".to_vec(), Object::Dict(descriptor)),
+    ]);
+    let font = Dict::from_iter([
+        (b"Type".to_vec(), Object::name("Font")),
+        (b"Subtype".to_vec(), Object::name("Type0")),
+        (b"BaseFont".to_vec(), Object::name("BAAAAA+SampleSans")),
+        (b"Encoding".to_vec(), Object::name("Identity-H")),
+        (b"DescendantFonts".to_vec(), Object::Array(vec![Object::Dict(cid_font)])),
+        (b"ToUnicode".to_vec(), Object::Ref(unicode)),
+    ]);
+    let p = pdfcraft_model::pages(&doc)[0].obj;
+    let fonts = Dict::from_iter([(b"F3".to_vec(), Object::Dict(font))]);
+    doc.update_dict(p, |d| d.set(b"Resources".to_vec(), Object::Dict(Dict::from_iter([(b"Font".to_vec(), Object::Dict(fonts))])))).unwrap();
+    let blocks = text::text_blocks(&doc, 0).unwrap();
+    assert_eq!(blocks.len(), 1, "one paragraph: {:?}", blocks.iter().map(|b| &b.text).collect::<Vec<_>>());
+    let draft = "Poland and Germany
+"
+    .repeat(20);
+    text::SOURCE_SPACE_CALLS.with(|c| c.set(0));
+    let layout = text::text_edit_layout(&doc, 0, 0, draft.trim_end(), &text::BlockStyle::default()).unwrap();
+    let calls = text::SOURCE_SPACE_CALLS.with(std::cell::Cell::get);
+    assert!(layout.draft_rect.is_some_and(|r| r[2] > r[0]), "laid out: {:?}", layout.draft_rect);
+    assert!(calls <= 8, "the space width was worked out {calls} times for {} characters", draft.len());
+}
+
 #[test]
 fn a_subset_keeps_its_font_for_glyphs_left_to_the_default_width() {
     let doc = skia_subset_page();
@@ -3377,6 +3436,55 @@ fn latin_ligature_actual_text_stays_on_its_line() {
     }
 }
 
+/// #3110: `/ActualText` may come from a named property list (`/Span /MC0 BDC`) looked up in the
+/// page's or the form's `/Properties`, as well as from an inline one.
+#[test]
+fn actual_text_from_named_property_list() {
+    let properties = "/Properties << /MC0 << /ActualText (Hello World) >> /MC1 << /Lang (en) >> >>";
+    let page_with = |content: &str| {
+        build(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> {properties} >> /Contents 4 0 R >>"),
+            &stream("", content),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        ])
+    };
+    for (content, expected) in [
+        ("/Span /MC0 BDC BT /F1 24 Tf 72 700 Td (Glyphs) Tj ET EMC", "Hello World"),
+        ("/Span <</ActualText (Hello World)>> BDC BT /F1 24 Tf 72 700 Td (Glyphs) Tj ET EMC", "Hello World"),
+        ("/Span /MC1 BDC BT /F1 24 Tf 72 700 Td (Glyphs) Tj ET EMC", "Glyphs"),
+        ("/Span /Missing BDC BT /F1 24 Tf 72 700 Td (Glyphs) Tj ET EMC", "Glyphs"),
+    ] {
+        let doc = page_with(content);
+        for doc in [&doc, &reopen(&doc)] {
+            let lines = text::text_lines(doc, 0).unwrap();
+            assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), [expected], "{content}");
+            assert_eq!(text::text_blocks(doc, 0).unwrap()[0].editor_text, expected, "{content}");
+            let reading: Vec<String> = text::reading_blocks(doc, 0).unwrap().into_iter().map(|b| b.text).collect();
+            assert_eq!(reading, [expected], "{content}");
+        }
+    }
+
+    // A form's named list is looked up in the form's own /Properties, not the page's.
+    let fm = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /Properties << /MC0 << /ActualText (Form text) >> >> >>",
+        "/Span /MC0 BDC BT /F1 24 Tf 72 600 Td (Glyphs) Tj ET EMC",
+    );
+    let doc = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        &format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> {properties} >> /Contents 4 0 R >>"
+        ),
+        &stream("", "/Fm1 Do"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        &fm,
+    ]);
+    let reading: Vec<String> = text::reading_blocks(&doc, 0).unwrap().into_iter().map(|b| b.text).collect();
+    assert_eq!(reading, ["Form text"]);
+}
+
 #[test]
 fn actual_text_and_visual_rtl_glyphs_keep_their_own_reading_order() {
     let hex: String = "שלום".encode_utf16().map(|u| format!("{u:04X}")).collect();
@@ -3817,6 +3925,74 @@ fn private_image_crop_with_intervening_state_resizes_across_streams() {
                 caption.iter().map(|l| (&l.text, l.rect, l.baseline())).collect::<Vec<_>>()
             );
         }
+    }
+}
+
+/// [`image_page`] with `pieces` as its `/Contents` array and a Form /Fm0 drawing 72,500–172,600.
+fn split_image_page(pieces: &[&[u8]]) -> Document {
+    let mut doc = image_page();
+    let page = pdfcraft_model::pages(&doc)[0].obj;
+    let mut form = Dict::new();
+    form.set(b"Type".to_vec(), Object::name("XObject"));
+    form.set(b"Subtype".to_vec(), Object::name("Form"));
+    form.set(b"BBox".to_vec(), Object::Array([72, 500, 172, 600].map(Object::Int).to_vec()));
+    let form = doc.add(Object::Stream(Stream::flate(form, b"0.5 g 72 500 100 100 re f")));
+    let image = doc.get(pdfcraft_model::pages(&doc)[0].obj);
+    let mut res = image.as_dict().and_then(|d| d.get(b"Resources")).and_then(|r| r.as_dict().cloned()).unwrap();
+    let mut xo = res.get(b"XObject").and_then(|x| x.as_dict().cloned()).unwrap();
+    xo.set(b"Fm0".to_vec(), Object::Ref(form));
+    res.set(b"XObject".to_vec(), Object::Dict(xo));
+    let refs = pieces.iter().map(|b| Object::Ref(doc.add(Object::Stream(Stream::flate(Dict::new(), b))))).collect();
+    doc.update_dict(page, |d| {
+        d.set(b"Contents".to_vec(), Object::Array(refs));
+        d.set(b"Resources".to_vec(), Object::Dict(res));
+    })
+    .unwrap();
+    doc
+}
+
+#[test]
+fn an_image_whose_operator_starts_the_next_stream_can_be_selected_moved_and_deleted() {
+    // #3113: an operator's operands end one piece and its keyword starts the next.
+    let square = [72.0, 500.0, 172.0, 600.0];
+    let cases: [(&[&[u8]], bool); 4] = [
+        (&[b"q 100 0 0 100 72 500 cm /Im0", b"Do Q"], false),
+        (&[b"q 100 0 0 100 72 500", b"cm /Im0 Do Q"], false),
+        (&[b"q /Fm0", b"Do Q"], true),
+        (&[b"q 100 0 0 100 72 500 cm /Im0 Do Q"], false),
+    ];
+    for (pieces, is_form) in cases {
+        let doc = split_image_page(pieces);
+        let label: Vec<_> = pieces.iter().map(|p| String::from_utf8_lossy(p)).collect();
+        let images = images::page_images(&doc, 0).unwrap();
+        assert_eq!(images.len(), 1, "{label:?}");
+        assert!(close(images[0].rect, square), "{label:?}: {:?}", images[0].rect);
+        assert_eq!(images[0].is_form, is_form);
+        assert!(images[0].contains([122.0, 550.0]), "{label:?}");
+        if !is_form {
+            let read = images::reading_images(&doc, 0).unwrap();
+            assert!(read.len() == 1 && close(read[0].rect, square), "{label:?}: {read:?}");
+        }
+
+        let mut deleted = doc.clone();
+        images::change_image(&mut deleted, 0, 0, &images::ImageChange::Delete).unwrap();
+        let deleted = reopen(&deleted);
+        assert!(images::page_images(&deleted, 0).unwrap().is_empty(), "{label:?}");
+        let (joined, ops) = joined_ops(&deleted);
+        assert!(!ops.iter().any(|o| o.is("Do")), "{joined}");
+
+        let target = [300.0, 500.0, 400.0, 600.0];
+        let mut moved = doc.clone();
+        images::change_image(&mut moved, 0, 0, &images::ImageChange::Transform(images::rect_to_rect(square, target))).unwrap();
+        let moved = reopen(&moved);
+        let after = images::page_images(&moved, 0).unwrap();
+        assert!(after.len() == 1 && close(after[0].rect, target), "{label:?}: {after:?} {:?}", joined_ops(&moved).0);
+
+        let mut shifted = doc.clone();
+        images::translate_images(&mut shifted, 0, &[0], [228.0, 0.0]).unwrap();
+        let shifted = reopen(&shifted);
+        let after = images::page_images(&shifted, 0).unwrap();
+        assert!(after.len() == 1 && close(after[0].rect, target), "{label:?}: {after:?} {:?}", joined_ops(&shifted).0);
     }
 }
 

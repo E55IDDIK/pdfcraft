@@ -1933,6 +1933,8 @@ fn days_in(y: i64, m: u32) -> u32 {
     }
 }
 
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
 fn format_date(y: i64, m: u32, d: u32, picture: &str) -> String {
     let pic: Vec<char> = picture.chars().collect();
     let mut out = String::new();
@@ -1954,6 +1956,19 @@ fn format_date(y: i64, m: u32, d: u32, picture: &str) -> String {
                 ('M', _) => out.push_str(MONTHS.get((m as usize).saturating_sub(1)).copied().unwrap_or("")),
                 ('D', 1) => out.push_str(&d.to_string()),
                 (_, _) => out.push_str(&format!("{d:02}")),
+            }
+        } else if pic[i] == 'E' {
+            let mut run = 1;
+            while i + run < pic.len() && pic[i + run] == 'E' {
+                run += 1;
+            }
+            i += run;
+            // Day 1 (1900-01-01) was a Monday, so the serial modulo 7 indexes from Sunday.
+            let weekday = days_from_civil(y, m, d).rem_euclid(7) as usize;
+            match run {
+                1 | 2 => out.push_str(&(weekday + 1).to_string()),
+                3 => out.push_str(WEEKDAYS.get(weekday).map_or("", |n| &n[..3])),
+                _ => out.push_str(WEEKDAYS.get(weekday).copied().unwrap_or("")),
             }
         } else {
             out.push(pic[i]);

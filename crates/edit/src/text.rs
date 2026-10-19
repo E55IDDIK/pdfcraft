@@ -740,7 +740,8 @@ fn interpret(
     cache: &mut HashMap<Vec<u8>, (Rc<Metrics>, Option<String>)>,
     carry: &mut Carry,
     mut invoked: Option<&mut Vec<Invocation>>,
-    logical_text: bool,
+    // `Some(properties)`: read `/ActualText`, looking named property lists up in `properties`.
+    logical_text: Option<&Dict>,
 ) -> Vec<Shown> {
     let mut out: Vec<Shown> = Vec::new();
     let mut ts = carry.ts.clone();
@@ -757,11 +758,16 @@ fn interpret(
                 // artifacts and inner spans, which inherit their enclosing region.
                 let region = matches!(op.name(0), Some(b"P" | b"H" | b"H1" | b"H2" | b"H3" | b"H4" | b"H5" | b"H6" | b"LI" | b"TD" | b"TH"));
                 marked.push(if region { Some(i) } else { marked.last().copied().flatten() });
-                let logical = op.operands.get(1).and_then(Object::as_dict).and_then(|d| d.get(b"ActualText")).and_then(|s| match s {
+                // The property list is inline or named in the resources' /Properties (§14.6.2).
+                let list = logical_text.and_then(|properties| match op.operands.get(1) {
+                    Some(Object::Name(n)) => properties.get(n).and_then(|o| doc.dict(o)),
+                    other => other.and_then(Object::as_dict).cloned(),
+                });
+                let logical = list.as_ref().and_then(|d| d.get(b"ActualText")).and_then(|s| match s {
                     Object::String(s) if s.bytes.len() <= 4_000_000 => Some(s.to_text()),
                     _ => None,
                 });
-                actual.push(if logical_text { logical.map(|s| (out.len(), i, s)) } else { None });
+                actual.push(logical.map(|s| (out.len(), i, s)));
             }
             b"EMC" => {
                 marked.pop();
@@ -1018,7 +1024,8 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
     // joined, so an operator whose operands end one piece still has them.
     let pieces = Pieces::join(&content_streams(doc, &p.dict).into_iter().map(|(_, d)| d).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
-    let shown = interpret(doc, &ops, &fonts_res, &mut cache, &mut carry, None, true);
+    let properties = res.get(b"Properties").and_then(|o| doc.dict(o)).unwrap_or_default();
+    let shown = interpret(doc, &ops, &fonts_res, &mut cache, &mut carry, None, Some(&properties));
     let mut last: Option<(usize, Pen)> = None; // the stream piece and where its last run ended
     for mut s in shown {
         // A single RTL glyph's ActualText (e.g. lam-alef) is an inline ligature, not a
@@ -1261,7 +1268,8 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
         let fonts_res = resources.get(b"Font").map(|f| w.doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
         let mut cache = HashMap::new();
         let mut invoked = Vec::new();
-        let shown = interpret(w.doc, ops, &fonts_res, &mut cache, carry, Some(&mut invoked), true);
+        let properties = resources.get(b"Properties").and_then(|o| w.doc.dict(o)).unwrap_or_default();
+        let shown = interpret(w.doc, ops, &fonts_res, &mut cache, carry, Some(&mut invoked), Some(&properties));
         let mut last = None;
         let mut last_stream = None;
         let mut forms = invoked.into_iter().peekable();
@@ -1661,7 +1669,15 @@ fn source_encodes(metrics: &Metrics, text: &str) -> bool {
     text.split(' ').all(|word| metrics.encode(word).is_some())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often [`source_space`] ran on this thread, for the test that pins it out of per-character loops.
+    pub(crate) static SOURCE_SPACE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn source_space(doc: &Document, fonts: &Dict, metrics: &Metrics) -> f64 {
+    #[cfg(test)]
+    SOURCE_SPACE_CALLS.with(|c| c.set(c.get().saturating_add(1)));
     let width = |m: &Metrics| m.encode(" ").map(|b| m.codes(&b).iter().map(|(c, _)| m.width(*c)).sum::<f64>());
     if let Some(w) = width(metrics) {
         return w;
@@ -1891,7 +1907,7 @@ pub fn clear_block(doc: &mut Document, page: usize, block: usize) -> Result<(), 
     let streams = content_streams(doc, &p.dict);
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
-    let shown = interpret(doc, &ops, &fonts, &mut HashMap::new(), &mut Carry::new(), None, false);
+    let shown = interpret(doc, &ops, &fonts, &mut HashMap::new(), &mut Carry::new(), None, None);
     let mut patches = HashMap::new();
     for s in shown.into_iter().filter(|s| drops.contains(&s.op)) {
         if s.state.render_mode >= 4 {
@@ -2548,7 +2564,7 @@ pub(crate) fn translate_blocks(doc: &mut Document, page: usize, indexes: &[usize
     let fonts = res.get(b"Font").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
-    let shown = interpret(doc, &ops, &fonts, &mut HashMap::new(), &mut Carry::new(), None, false);
+    let shown = interpret(doc, &ops, &fonts, &mut HashMap::new(), &mut Carry::new(), None, None);
     let mut patches = HashMap::new();
     // Keep full precision: a tiny rounded text-space change can be magnified by a CTM,
     // and restoring rise/spacing must not alter following unselected text.

@@ -9,6 +9,9 @@
 //! Encrypted documents are stored encrypted (the working file is), so recovery never writes
 //! plaintext of a protected document to disk. The web build has no recovery store yet.
 //!
+//! On Unix the folder is owner-only (`0o700`), so other accounts on the machine can't read the
+//! snapshots of documents that aren't encrypted.
+//!
 //! A running instance holds an exclusively locked `instance-<pid>-<n>.lock` in the folder and
 //! names it in the snapshots it writes, so a second instance can tell live autosaves from a
 //! crash's leftovers and neither offers nor discards them (#2166). The OS releases the lock
@@ -75,12 +78,31 @@ impl RecoveryStore {
         Self { dir: dir.into(), lock: Arc::default() }
     }
 
+    /// Create the folder if it is missing. On Unix only the owner may open it: snapshots are
+    /// unsaved copies of open documents, and with the default mode other accounts on the
+    /// machine could read them. A folder an earlier version made is tightened too. A volume
+    /// that can't change modes (FAT, some network shares) works as before, with one warning in
+    /// the log.
+    fn create_dir(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let open_to_others = std::fs::metadata(&self.dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+            if open_to_others && let Err(e) = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)) {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| log::warn!("recovery folder {} can't be made owner-only: {e}", self.dir.display()));
+            }
+        }
+        Ok(())
+    }
+
     /// Mark the folder as in use by a running instance (see the module doc). Without a lock
     /// (the folder can't be written, or the platform has no file locks) snapshots are written
     /// and offered as before.
     pub fn claim(&self) {
         self.lock.get_or_init(|| {
-            if let Err(e) = std::fs::create_dir_all(&self.dir) {
+            if let Err(e) = self.create_dir() {
                 log::warn!("recovery folder {} can't be made: {e}", self.dir.display());
                 return None;
             }
@@ -166,7 +188,7 @@ impl RecoveryStore {
     /// Write (or replace) an entry. The PDF is written before its metadata, both atomically, so
     /// a listed entry always has complete bytes.
     pub fn write(&self, meta: &RecoveryMeta, bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        self.create_dir()?;
         crate::editing::write_atomically(&self.dir.join(format!("{}.pdf", meta.key)).to_string_lossy(), bytes)?;
         let json = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
         crate::editing::write_atomically(&self.dir.join(format!("{}.json", meta.key)).to_string_lossy(), &json)

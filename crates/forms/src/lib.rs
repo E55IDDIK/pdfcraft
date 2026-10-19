@@ -103,6 +103,8 @@ pub struct Widget {
     pub hidden: bool,
     /// `/MK /R` as 0, 90, 180 or 270 degrees counterclockwise. Anything else is stored as 0.
     pub rotation: i64,
+    /// Push buttons: the normal label (`/MK /CA`), separate from the field's name.
+    pub caption: Option<String>,
     /// List boxes: where the options are drawn, so a click can pick the one under the pointer.
     pub list: Option<appearance::ListRows>,
 }
@@ -802,6 +804,13 @@ fn walk(
                 locked: annot_flags & 128 != 0,
                 hidden: annot_flags & (2 | 32) != 0,
                 rotation: appearance::mk_rotation(doc, wd),
+                caption: (kind == FieldKind::PushButton)
+                    .then(|| {
+                        let mk = doc.resolve(wd.get(b"MK")?);
+                        let value = doc.resolve(mk.as_dict()?.get(b"CA")?);
+                        value.as_string().map(|s| s.to_text())
+                    })
+                    .flatten(),
                 list: (kind == FieldKind::List).then(|| appearance::list_rows_of(doc, inh.da.as_deref().unwrap_or("/Helv 0 Tf 0 g"), Some(d), wd)),
             })
         })

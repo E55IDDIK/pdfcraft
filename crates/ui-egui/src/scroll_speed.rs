@@ -18,7 +18,7 @@ pub enum ScrollSpeed {
 }
 
 /// egui's own `line_scroll_speed`, which its wheel zoom rate is tuned against.
-const EGUI_LINE_POINTS: f32 = if cfg!(target_arch = "wasm32") { 8.0 } else { 40.0 };
+pub(crate) const EGUI_LINE_POINTS: f32 = if cfg!(target_arch = "wasm32") { 8.0 } else { 40.0 };
 
 /// Points one wheel line scrolls at Normal speed.
 const NORMAL_LINE_POINTS: f32 = if cfg!(target_arch = "wasm32") {

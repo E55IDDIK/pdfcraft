@@ -411,3 +411,23 @@ fn a_running_instances_autosaves_are_not_offered_to_a_second_instance() {
     let fourth = harness(instance());
     assert_eq!(fourth.state().recoverable.len(), 1, "a name outside the folder is not looked at, and the snapshot is offered");
 }
+
+/// Snapshots are unsaved copies of open documents, so on Unix only the owner may open the
+/// folder: a new one is made that way, and one an earlier version left with the default mode is
+/// tightened when an instance starts.
+#[cfg(unix)]
+#[test]
+fn the_recovery_folder_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |s: &RecoveryStore| std::fs::metadata(s.dir()).unwrap().permissions().mode() & 0o777;
+    let fresh = store("owner-only");
+    crashed_session(&fresh, fixture(2), None, None);
+    assert_eq!(files_in(&fresh), 2);
+    assert_eq!(mode(&fresh), 0o700);
+
+    let earlier = store("owner-only-earlier");
+    std::fs::create_dir_all(earlier.dir()).unwrap();
+    std::fs::set_permissions(earlier.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    earlier.claim();
+    assert_eq!(mode(&earlier), 0o700);
+}

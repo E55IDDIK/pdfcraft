@@ -1987,13 +1987,12 @@ pub fn set_font_size(doc: &mut Document, page: usize, index: usize, size: f64, m
     result
 }
 
-/// Whether a comment of this subtype has an interior that can be filled (`/IC`: rectangles,
-/// ovals, polygons and clouds, §12.5.6.8–9).
+/// Whether a comment has a fill: `/IC` for shapes, `/C` for FreeText (§12.5.6).
 pub fn fillable(subtype: &str) -> bool {
-    matches!(subtype, "Square" | "Circle" | "Polygon")
+    matches!(subtype, "Square" | "Circle" | "Polygon" | "FreeText")
 }
 
-/// Fill a rectangle, oval or polygon comment with `fill`, or remove its fill (`None`), and
+/// Fill a shape or FreeText comment with `fill`, or remove its fill (`None`), and
 /// redraw its appearance (Acrobat: Properties ▸ Fill Color).
 pub fn set_fill(doc: &mut Document, page: usize, index: usize, fill: Option<Rgb>, meta: &Meta) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
@@ -2001,7 +2000,7 @@ pub fn set_fill(doc: &mut Document, page: usize, index: usize, fill: Option<Rgb>
     let d = annot_dict(doc, r);
     let subtype = String::from_utf8_lossy(d.name(b"Subtype").unwrap_or_default()).into_owned();
     if !fillable(&subtype) {
-        return Err(AnnotError::Invalid("only rectangles, ovals and polygons can be filled".into()));
+        return Err(AnnotError::Invalid("only rectangles, ovals, polygons and text boxes can be filled".into()));
     }
     // Check before changing anything: a stale appearance would contradict the new fill.
     if appearance::build(&d).is_none() {
@@ -2013,10 +2012,11 @@ pub fn set_fill(doc: &mut Document, page: usize, index: usize, fill: Option<Rgb>
     refuse_foreign_text(doc, &d)?;
     let before = d;
     doc.update_dict(r, |d| {
+        let key: &[u8] = if subtype == "FreeText" { b"C" } else { b"IC" };
         match fill {
-            Some(c) => d.set(b"IC".to_vec(), rgb(c)),
+            Some(c) => d.set(key.to_vec(), rgb(c)),
             None => {
-                d.remove(b"IC");
+                d.remove(key);
             }
         }
         touch(d, meta);
@@ -2205,7 +2205,7 @@ pub struct Props {
     pub subject: String,
     pub color: Option<Rgb>,
     pub opacity: f64,
-    /// Border / line width, for shapes, lines and drawings.
+    /// Border / line width, for shapes, lines, drawings and text boxes.
     pub width: Option<f64>,
     /// Notes only.
     pub icon: Option<NoteIcon>,
@@ -2217,9 +2217,9 @@ pub struct Props {
     pub locked: bool,
     /// `/LE`: two names for a line or polyline (`None` when unset), one for a callout.
     pub endings: Option<Vec<LineEnding>>,
-    /// Rectangles, ovals and polygons: their interior can be filled (see [`fillable`]).
+    /// Whether the comment has a fill control (see [`fillable`]).
     pub fillable: bool,
-    /// `/IC`, the interior colour (`None`: no fill).
+    /// The interior colour (`None`: no fill).
     pub fill: Option<Rgb>,
     /// Text boxes, typewriter text and callouts: the `/DA` font size in points.
     pub font_size: Option<f64>,
@@ -2234,8 +2234,13 @@ pub fn props(doc: &Document, page: usize, index: usize) -> Option<Props> {
     let subtype = String::from_utf8_lossy(d.name(b"Subtype")?).into_owned();
     let c: Vec<f64> = d.get(b"C").and_then(|o| o.as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect())).unwrap_or_default();
     let color = if subtype == "FreeText" { Some(appearance::parse_da(d).0) } else { (c.len() == 3).then(|| [c[0], c[1], c[2]]) };
-    let width = matches!(subtype.as_str(), "Square" | "Circle" | "Line" | "Ink" | "Polygon" | "PolyLine")
-        .then(|| d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap_or(1.0));
+    let width = matches!(subtype.as_str(), "Square" | "Circle" | "Line" | "Ink" | "Polygon" | "PolyLine" | "FreeText").then(|| {
+        if subtype == "FreeText" {
+            if !d.contains(b"BS") && !d.contains(b"Border") { 0.0 } else { appearance::border_width(d) }
+        } else {
+            d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap_or(1.0)
+        }
+    });
     Some(Props {
         author: text_value(doc, d, b"T").unwrap_or_default(),
         subject: text_value(doc, d, b"Subj").unwrap_or_default(),
@@ -2254,9 +2259,10 @@ pub fn props(doc: &Document, page: usize, index: usize) -> Option<Props> {
     })
 }
 
-/// `/IC` as an RGB colour. An empty array means no fill; grey and CMYK fills are converted.
+/// A shape’s `/IC` or FreeText `/C` as RGB. Grey and CMYK fills are converted.
 fn fill_of(d: &Dict) -> Option<Rgb> {
-    let c: Vec<f64> = d.get(b"IC")?.as_array()?.iter().filter_map(|x| x.as_f64()).collect();
+    let key: &[u8] = if d.name(b"Subtype") == Some(b"FreeText") { b"C" } else { b"IC" };
+    let c: Vec<f64> = d.get(key)?.as_array()?.iter().filter_map(|x| x.as_f64()).collect();
     let rgb = match c.as_slice() {
         [g] => [*g; 3],
         [r, g, b] => [*r, *g, *b],

@@ -261,6 +261,12 @@ pub fn scan(doc: &Document) -> Vec<(Hidden, usize)> {
 }
 
 /// Remove the chosen categories. Returns what was removed per category.
+///
+/// # Errors
+///
+/// This operation is not transactional: an error may leave `doc` partially modified, with
+/// sensitive content still present. Call this on a working clone and replace the original only
+/// on success. On any error, discard the working clone; do not save or reuse it.
 pub fn remove_hidden(doc: &mut Document, which: &[Hidden]) -> Result<Vec<(Hidden, usize)>, RedactError> {
     let counts = scan(doc);
     let count = |h: Hidden| counts.iter().find(|c| c.0 == h).map_or(0, |c| c.1);

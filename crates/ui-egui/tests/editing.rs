@@ -2080,7 +2080,12 @@ fn protected(user: &str, owner: &str, permissions: i32) -> Vec<u8> {
 }
 
 fn protected_with(algorithm: pdfcraft_cos::Algorithm, user: &str, owner: &str, permissions: i32) -> Vec<u8> {
-    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(fixture(2))).unwrap();
+    encrypted(fixture(2), algorithm, user, owner, permissions)
+}
+
+/// `bytes` rewritten encrypted.
+fn encrypted(bytes: Vec<u8>, algorithm: pdfcraft_cos::Algorithm, user: &str, owner: &str, permissions: i32) -> Vec<u8> {
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
     doc.set_encryption(&pdfcraft_cos::NewEncryption {
         algorithm,
         user_password: user,
@@ -2200,6 +2205,25 @@ fn remove_security_asks_for_the_permissions_password_first() {
     type_password(&mut h, "owner");
     let doc = h.state().session.get(id).unwrap();
     assert!(doc.dirty && doc.security_summary().is_none(), "security is removed (written by the next save)");
+}
+
+/// A secured form still says it is one and offers Highlight fields: the security notice joins
+/// the form's instead of replacing it.
+#[test]
+fn a_secured_form_shows_its_form_notice_and_its_security() {
+    // Changing and assembling withheld, filling allowed (as government forms are often set).
+    let bytes = encrypted(include_bytes!("data/form.pdf").to_vec(), pdfcraft_cos::Algorithm::Aes256, "", "owner", -1036);
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("form.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h.get_by_label_contains("interactive form fields. This document is secured. Some changes are restricted by its security settings.");
+    h.get_by_label("Highlight fields");
+    h.get_by_label("Security settings");
+    h.get_by_label("Unlock…");
 }
 
 #[test]

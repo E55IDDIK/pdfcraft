@@ -355,6 +355,27 @@ fn a_middle_click_closes_the_tab() {
 }
 
 #[test]
+fn a_link_prompt_above_a_save_prompt_owns_its_keys() {
+    for key in [egui::Key::Escape, egui::Key::Enter] {
+        let mut h = harness(|app| {
+            app.open_bytes("first.pdf", None, FIXTURE.to_vec()).unwrap();
+            app.apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 });
+            app.close_request = Some(pdfcraft_ui_egui::CloseRequest::Tab(app.views[0].id));
+        });
+        h.run_steps(3);
+        h.state_mut().pending_link =
+            Some(pdfcraft_ui_egui::PendingLink { url: "https://example.org".to_owned(), origin: pdfcraft_ui_egui::LinkOrigin::Link });
+        h.run_steps(3);
+        h.key_press(key);
+        h.run_steps(3);
+        assert_eq!(h.state().pending_link.is_some(), key == egui::Key::Enter);
+        assert!(h.state().close_request.is_some(), "the save prompt stays open after {key:?}");
+        assert_eq!(h.state().views.len(), 1, "the edited document remains open");
+        assert!(h.state().last_opened_url.is_none());
+    }
+}
+
+#[test]
 fn overflowing_tabs_can_be_reached_by_scrolling() {
     let mut h = harness(|app| {
         for i in 0..20 {

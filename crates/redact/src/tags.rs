@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object};
 
+use crate::RedactError;
+
 /// Each MCID's operators (serialized), and whether anything is still drawn inside it.
 fn by_mcid(doc: &Document, resources: &Dict, data: &[u8]) -> HashMap<i64, (Vec<u8>, bool)> {
     let mut out: HashMap<i64, (Vec<u8>, bool)> = HashMap::new();
@@ -103,7 +105,23 @@ pub(crate) fn clean(
     stream: Option<(ObjRef, ObjRef)>,
     changed: &HashSet<i64>,
     empty: &HashSet<i64>,
-) -> Result<usize, pdfcraft_cos::CosError> {
+) -> Result<usize, RedactError> {
+    clean_within(doc, page, stream, changed, empty, MAX_STRUCT_REFS)
+}
+
+/// [`clean`], visiting at most `limit` structure-tree references. Fail-closed (#3302): when the
+/// cleanup can't be shown complete, it is [`RedactError::Tags`] and the redaction isn't made. That
+/// is a tree too large to walk in full (it could hide an element that repeats the redacted text),
+/// an element whose inherited page can't be found (its ancestry too deep, or looping), and an
+/// element written in place that would need changing (only the object holding it could be).
+pub(crate) fn clean_within(
+    doc: &mut Document,
+    page: ObjRef,
+    stream: Option<(ObjRef, ObjRef)>,
+    changed: &HashSet<i64>,
+    empty: &HashSet<i64>,
+    limit: usize,
+) -> Result<usize, RedactError> {
     if changed.is_empty() && stream.is_none() {
         return Ok(0);
     }
@@ -114,16 +132,43 @@ pub(crate) fn clean(
     else {
         return Ok(0);
     };
-    // Indirect elements with the page they inherit.
-    let mut todo: Vec<(Object, Option<ObjRef>)> = root.get(b"K").map(|k| vec![(k.clone(), None)]).unwrap_or_default();
+    // Indirect elements with the page they inherit. Elements are reached from the root's /K, and
+    // also from the parent tree and the ID tree: one listed only there still owns marked content
+    // (#3302). The stack pops /K first, so an element reached through /K gets the page it inherits
+    // from its ancestors before a tree reaches it without one.
+    let mut todo: Vec<(Object, Option<ObjRef>)> =
+        [&b"IDTree"[..], b"ParentTree", b"K"].iter().filter_map(|key| root.get(key).cloned()).map(|k| (k, None)).collect();
     let mut seen = HashSet::new();
+    let mut pages = HashMap::new();
     let mut hits: Vec<(ObjRef, Dict, Option<ObjRef>, bool)> = Vec::new();
+    // Whether marked content `x` (a kid on page `pg`) is one this cleanup must change.
+    let touches = |doc: &Document, x: &Object, pg: Option<ObjRef>| {
+        mcid_of(doc, x, pg, page, stream).is_some_and(|m| stream.is_some() || changed.contains(&m) || empty.contains(&m))
+    };
     while let Some((k, pg)) = todo.pop() {
         match k {
             Object::Array(a) => todo.extend(a.into_iter().map(|x| (x, pg))),
+            // A number or name tree node written in place.
+            Object::Dict(d) if !d.contains(b"S") => todo.extend(tree_node_entries(&d).into_iter().map(|x| (x, pg))),
+            // An element written in place: its kids are followed, but if it owns marked content
+            // this cleanup changes, only rewriting what holds it could change it.
+            Object::Dict(d) => {
+                let pg = match d.get(b"Pg").and_then(Object::as_ref).or(pg) {
+                    Some(p) => Some(p),
+                    None => inherited_page(doc, &d, &mut pages)?,
+                };
+                let kids = kids_of(doc, &d);
+                if kids.iter().any(|x| touches(doc, x, pg)) {
+                    return Err(RedactError::Tags);
+                }
+                todo.extend(kids.into_iter().map(|x| (x, pg)));
+            }
             Object::Ref(r) => {
-                if !seen.insert(r) || seen.len() > 2_000_000 {
+                if !seen.insert(r) {
                     continue;
+                }
+                if seen.len() > limit {
+                    return Err(RedactError::Tags);
                 }
                 let object = doc.get(r);
                 if let Object::Array(a) = &*object {
@@ -132,16 +177,15 @@ pub(crate) fn clean(
                 }
                 let Some(d) = object.as_dict().cloned() else { continue };
                 if !d.contains(b"S") {
+                    // A parent tree or ID tree node: its values may be elements.
+                    todo.extend(tree_node_entries(&d).into_iter().map(|x| (x, pg)));
                     continue;
                 }
-                let pg = d.get(b"Pg").and_then(Object::as_ref).or(pg);
-                let kids: Vec<Object> = match d.get(b"K").map(|k| doc.resolve(k)) {
-                    Some(o) => match &*o {
-                        Object::Array(a) => a.clone(),
-                        _ => d.get(b"K").cloned().into_iter().collect(),
-                    },
-                    None => Vec::new(),
+                let pg = match d.get(b"Pg").and_then(Object::as_ref).or(pg) {
+                    Some(p) => Some(p),
+                    None => inherited_page(doc, &d, &mut pages)?,
                 };
+                let kids = kids_of(doc, &d);
                 let sensitive = kids.iter().any(|x| mcid_of(doc, x, pg, page, stream).is_some_and(|m| changed.contains(&m)));
                 let remap = stream.is_some() && kids.iter().any(|x| mcid_of(doc, x, pg, page, stream).is_some());
                 if sensitive || remap {
@@ -203,6 +247,49 @@ pub(crate) fn clean(
     Ok(n)
 }
 
+/// The page an element inherits (§14.7.4.4): the nearest `/Pg` among its ancestors, following
+/// `/P`. `Ok(None)` when none has one; [`RedactError::Tags`] when the lookup gives up (more than
+/// [`MAX_PARENTS`] ancestors, or a loop), which isn't the same as having no page. `pages` keeps
+/// each ancestor's answer, so siblings don't climb the same chain again.
+fn inherited_page(doc: &Document, d: &Dict, pages: &mut HashMap<ObjRef, Option<ObjRef>>) -> Result<Option<ObjRef>, RedactError> {
+    let mut chain: Vec<ObjRef> = Vec::new();
+    let mut parent = d.get(b"P").and_then(Object::as_ref);
+    let found = loop {
+        let Some(r) = parent else { break None };
+        if let Some(known) = pages.get(&r) {
+            break *known;
+        }
+        if chain.len() >= MAX_PARENTS || chain.contains(&r) {
+            return Err(RedactError::Tags);
+        }
+        chain.push(r);
+        let object = doc.get(r);
+        let Some(p) = object.as_dict() else { break None };
+        if let Some(pg) = p.get(b"Pg").and_then(Object::as_ref) {
+            break Some(pg);
+        }
+        parent = p.get(b"P").and_then(Object::as_ref);
+    };
+    for r in chain {
+        pages.insert(r, found);
+    }
+    Ok(found)
+}
+
+/// An element's kids: its `/K` array, or the one kid it has.
+fn kids_of(doc: &Document, d: &Dict) -> Vec<Object> {
+    match d.get(b"K").map(|k| doc.resolve(k)) {
+        Some(o) => match &*o {
+            Object::Array(a) => a.clone(),
+            _ => d.get(b"K").cloned().into_iter().collect(),
+        },
+        None => Vec::new(),
+    }
+}
+
+/// The most ancestors [`inherited_page`] looks through; deeper trees, and cycles, go unanswered.
+const MAX_PARENTS: usize = 256;
+
 /// Whether `o` is an object reference (`/Type /OBJR`, direct or indirect) to one of `gone`.
 fn refers_to(doc: &Document, o: &Object, gone: &HashSet<ObjRef>) -> bool {
     doc.resolve(o)
@@ -210,22 +297,34 @@ fn refers_to(doc: &Document, o: &Object, gone: &HashSet<ObjRef>) -> bool {
         .is_some_and(|d| d.name(b"Type") == Some(b"OBJR") && d.get(b"Obj").and_then(Object::as_ref).is_some_and(|r| gone.contains(&r)))
 }
 
+/// What a number or name tree node leads on to: its `/Nums` or `/Names` array (keys and values
+/// alike; the walk ignores numbers and strings) and its `/Kids`.
+fn tree_node_entries(d: &Dict) -> Vec<Object> {
+    [&b"Nums"[..], b"Names", b"Kids"].iter().filter_map(|key| d.get(key).cloned()).collect()
+}
+
 /// Drop the structure tree's object references (OBJR) to `gone`, annotations removed from their
 /// pages (#2447). A tagged PDF's tree points at each link and comment it tags; left there, the
 /// reference keeps the annotation, its URL or text included, in a full rewrite after the page
 /// no longer lists it. Returns how many references were dropped.
-pub(crate) fn drop_object_refs(doc: &mut Document, gone: &HashSet<ObjRef>) -> Result<usize, pdfcraft_cos::CosError> {
+///
+/// Only elements that are objects of their own are edited: changing a structure element written in
+/// place (a direct dictionary in a `/K` array or a tree) means rewriting the object that holds it,
+/// so when one of those refers to a removed annotation it is [`RedactError::Tags`] (fail-closed).
+/// Producers rarely write elements that way.
+pub(crate) fn drop_object_refs(doc: &mut Document, gone: &HashSet<ObjRef>) -> Result<usize, RedactError> {
     drop_object_refs_within(doc, gone, MAX_STRUCT_REFS)
 }
 
 /// The most structure-tree references [`drop_object_refs`] visits.
 const MAX_STRUCT_REFS: usize = 2_000_000;
 
-/// [`drop_object_refs`], visiting at most `limit` references. A tree too large to walk in full
-/// could keep a reference the walk never reached, so then the whole structure tree goes instead
-/// (with `/MarkInfo`, which would claim tags there no longer are): fail-closed, at the cost of
-/// the document's tags.
-pub(crate) fn drop_object_refs_within(doc: &mut Document, gone: &HashSet<ObjRef>, limit: usize) -> Result<usize, pdfcraft_cos::CosError> {
+/// [`drop_object_refs`], visiting at most `limit` references. Fail-closed: a tree too large to
+/// walk in full could keep a reference the walk never reached, and an element written in place
+/// can only be changed by rewriting what holds it, so either is [`RedactError::Tags`] rather than
+/// a cleanup that leaves the annotation reachable (removing only the tree would not: an outline
+/// item's `/SE` or a link's `/SD` still reaches its elements).
+pub(crate) fn drop_object_refs_within(doc: &mut Document, gone: &HashSet<ObjRef>, limit: usize) -> Result<usize, RedactError> {
     if gone.is_empty() {
         return Ok(0);
     }
@@ -236,23 +335,31 @@ pub(crate) fn drop_object_refs_within(doc: &mut Document, gone: &HashSet<ObjRef>
     else {
         return Ok(0);
     };
-    let mut todo: Vec<Object> = root.get(b"K").cloned().into_iter().collect();
+    // Elements are reached from the root's /K, and also from the parent tree and the ID tree:
+    // one listed only there (left behind by an editor, say) still points at its annotation.
+    let mut todo: Vec<Object> = [&b"K"[..], b"ParentTree", b"IDTree"].iter().filter_map(|key| root.get(key).cloned()).collect();
     let mut seen = HashSet::new();
     let mut hits: Vec<ObjRef> = Vec::new();
     while let Some(k) = todo.pop() {
         match k {
             Object::Array(a) => todo.extend(a),
+            // A structure element written in place: its kids are followed; one that tags a
+            // removed annotation can't be changed here (see above).
+            Object::Dict(d) if d.contains(b"S") => {
+                let kids = kids_of(doc, &d);
+                if kids.iter().any(|x| refers_to(doc, x, gone)) {
+                    return Err(RedactError::Tags);
+                }
+                todo.extend(kids);
+            }
+            // A number or name tree node written in place (§7.9.6, §7.9.7): its values and kids.
+            Object::Dict(d) => todo.extend(tree_node_entries(&d)),
             Object::Ref(r) => {
                 if !seen.insert(r) {
                     continue;
                 }
                 if seen.len() > limit {
-                    let Some(catalog) = doc.root() else { return Ok(0) };
-                    doc.update_dict(catalog, |c| {
-                        c.remove(b"StructTreeRoot");
-                        c.remove(b"MarkInfo");
-                    })?;
-                    return Ok(0);
+                    return Err(RedactError::Tags);
                 }
                 let object = doc.get(r);
                 if let Object::Array(a) = &*object {
@@ -261,15 +368,11 @@ pub(crate) fn drop_object_refs_within(doc: &mut Document, gone: &HashSet<ObjRef>
                 }
                 let Some(d) = object.as_dict() else { continue };
                 if !d.contains(b"S") {
+                    // A parent tree or ID tree node: its values may be elements.
+                    todo.extend(tree_node_entries(d));
                     continue;
                 }
-                let kids: Vec<Object> = match d.get(b"K").map(|k| doc.resolve(k)) {
-                    Some(o) => match &*o {
-                        Object::Array(a) => a.clone(),
-                        _ => d.get(b"K").cloned().into_iter().collect(),
-                    },
-                    None => Vec::new(),
-                };
+                let kids = kids_of(doc, d);
                 if kids.iter().any(|x| refers_to(doc, x, gone)) {
                     hits.push(r);
                 }

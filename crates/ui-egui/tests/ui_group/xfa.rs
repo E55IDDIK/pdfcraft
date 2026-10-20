@@ -212,3 +212,22 @@ fn scripts_turned_off_by_a_click_bring_a_closed_notice_bar_back() {
     assert!(h.state().views[0].notice_dismissed);
     assert!(!says_scripts_are_off(&h.state().toast), "{:?}", h.state().toast);
 }
+
+#[test]
+fn a_secured_dynamic_xfa_form_shows_its_layout_and_its_security() {
+    // Changing and assembling withheld, filling allowed.
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(pdfcraft_xfa::fixtures::shell(&pdfcraft_xfa::fixtures::template(2)))).unwrap();
+    doc.set_encryption(&pdfcraft_cos::NewEncryption {
+        algorithm: pdfcraft_cos::Algorithm::Aes256,
+        user_password: "",
+        owner_password: "owner",
+        permissions: -1036,
+        encrypt_metadata: true,
+        seed: [4; 32],
+    })
+    .unwrap();
+    let h = open(pdfcraft_cos::write_full(&doc, &Default::default()).unwrap());
+    h.get_by_label_contains("laid out from its template: 2 pages, 11 fields. This document is secured.");
+    h.get_by_label("Highlight fields");
+    h.get_by_label("Security settings");
+}

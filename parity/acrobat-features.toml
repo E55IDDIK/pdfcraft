@@ -1094,8 +1094,8 @@ milestone = "M3"
 status = "shipped"
 commands = ["view.read_mode"]
 tools = []
-evidence = ["crates/ui-egui/tests/control.rs::inspect_and_click_by_label_and_id", "crates/ui-egui/tests/commands.rs::every_registered_command_is_implemented"]
-notes = ""
+evidence = ["crates/ui-egui/tests/control.rs::inspect_and_click_by_label_and_id", "crates/ui-egui/tests/commands.rs::every_registered_command_is_implemented", "crates/ui-egui/tests/view.rs::switching_modes_keeps_the_current_page_at_fixed_zoom"]
+notes = "Switching between Read and the docking workspace preserves the document’s current scroll position at fixed zoom; each tab keeps its own position"
 
 [[feature]]
 id = "view.full-screen"
@@ -1802,8 +1802,8 @@ milestone = "M3"
 status = "shipped"
 commands = []
 tools = []
-evidence = ["crates/ui-egui/tests/editing.rs::restricted_documents_show_a_notice_and_block_page_changes"]
-notes = ""
+evidence = ["crates/ui-egui/tests/editing.rs::restricted_documents_show_a_notice_and_block_page_changes", "crates/ui-egui/tests/editing.rs::a_secured_form_shows_its_form_notice_and_its_security", "crates/ui-egui/tests/ui_group/xfa.rs::a_secured_dynamic_xfa_form_shows_its_layout_and_its_security"]
+notes = "On a secured form (fields or XFA), the security sentence follows the form's notice, which keeps Highlight fields and the XFA layout notes."
 
 [[feature]]
 id = "view.pdfa-view-mode"
@@ -3860,8 +3860,8 @@ milestone = "M5"
 status = "shipped"
 commands = ["comment.list"]
 tools = ["comment_edit"]
-evidence = ["crates/ui-egui/tests/comments.rs::comment_properties_change_appearance_and_author", "crates/annot/src/tests.rs::author_subject_and_note_icon_change", "crates/ui-egui/tests/comments.rs::shapes_take_a_fill_colour_from_the_quick_bar_and_properties", "crates/ui-egui/tests/comments.rs::text_box_properties_change_the_font_size", "crates/annot/src/tests.rs::text_box_font_size_changes_the_da_and_grows_the_box", "crates/automation/tests/automation.rs::text_box_font_size_through_the_tool"]
-notes = "Appearance (colour, fill colour for rectangles/ovals/polygons, opacity, thickness, note icon, font size of text boxes, typewriter text and callouts: 1-400 pt, written to /DA and the rich-text strings, the box grows to fit and never shrinks; comment_edit font_size), General (author, subject), Review History. Still missing: font family, bold/italic, alignment and per-run formatting of text boxes; the quick bar has no font size for new text boxes (they start at 12 pt, callouts 10 pt)"
+evidence = ["crates/ui-egui/tests/comments.rs::comment_properties_change_appearance_and_author", "crates/annot/src/tests.rs::author_subject_and_note_icon_change", "crates/ui-egui/tests/comments.rs::shapes_take_a_fill_colour_from_the_quick_bar_and_properties", "crates/ui-egui/tests/comments.rs::text_box_properties_change_the_font_size", "crates/ui-egui/tests/comments.rs::text_box_and_callout_properties_include_fill_and_thickness", "crates/annot/src/tests.rs::text_boxes_and_callouts_can_change_fill_and_border", "crates/automation/tests/automation.rs::text_box_and_callout_fill_and_border_through_tools", "crates/annot/src/tests.rs::text_box_font_size_changes_the_da_and_grows_the_box", "crates/automation/tests/automation.rs::text_box_font_size_through_the_tool"]
+notes = "Appearance (colour, fill colour for rectangles/ovals/polygons/text boxes/callouts, opacity, thickness, note icon, font size of text boxes, typewriter text and callouts: 1-400 pt, written to /DA and the rich-text strings, the box grows to fit and never shrinks; comment_edit font_size), General (author, subject), Review History. Still missing: font family, bold/italic, alignment and per-run formatting of text boxes; the quick bar has no font size for new text boxes (they start at 12 pt, callouts 10 pt)"
 
 [[feature]]
 id = "comment.properties-bar"
@@ -4160,8 +4160,8 @@ milestone = "M5"
 status = "shipped"
 commands = ["comment.export"]
 tools = ["doc_export_data"]
-evidence = ["crates/xfdf/src/tests.rs::xfdf_round_trips_comments_and_values", "crates/xfdf/src/tests.rs::fdf_round_trips_values_and_comments", "crates/automation/tests/automation.rs::comments_and_form_data_travel_as_xfdf_fdf_and_text", "crates/xfdf/src/tests.rs::xfdf_exports_preserve_whitespace_in_comment_attributes"]
-notes = "XFDF exports retain tabs and line breaks in comment identities and metadata."
+evidence = ["crates/xfdf/src/tests.rs::fdf_export_nulls_nested_page_links_without_copying_the_source_page_tree", "crates/xfdf/src/tests.rs::fdf_export_bounds_indirect_type_alias_lookups", "crates/xfdf/src/tests.rs::fdf_export_preserves_metadata_with_stale_type_references", "crates/xfdf/src/tests.rs::fdf_export_keeps_indirect_values_nested_in_annotation_properties", "crates/xfdf/src/tests.rs::fdf_export_preserves_shared_cycles_and_nested_streams_without_expansion", "crates/xfdf/src/tests.rs::fdf_export_refuses_excessive_direct_depth_values_and_payload", "crates/xfdf/src/tests.rs::fdf_export_refuses_aliases_before_cloning_large_annotation_values", "crates/xfdf/src/tests.rs::fdf_export_refuses_repeated_saved_annotations_after_cache_eviction", "crates/automation/tests/automation.rs::fdf_nested_comment_values_survive_export_import_and_save_through_tools", "crates/automation/tests/automation.rs::refused_fdf_export_keeps_the_destination_and_source_through_tools", "crates/xfdf/src/tests.rs::xfdf_round_trips_comments_and_values", "crates/xfdf/src/tests.rs::fdf_round_trips_values_and_comments", "crates/automation/tests/automation.rs::comments_and_form_data_travel_as_xfdf_fdf_and_text", "crates/xfdf/src/tests.rs::xfdf_exports_preserve_whitespace_in_comment_attributes"]
+notes = "FDF preserves shared/cyclic nested values. Discovery keeps lazy array owners and annotation positions; retained entries are budgeted before cloning, including after saved-PDF cache eviction. Copied-graph limits are 100,000 comments/objects/values, 64 direct levels and a conservative 64 MiB data budget; refusal precedes writing. Source parsing and page discovery retain existing COS/parser limits, with no total source-memory bound. Source /Page and /Pages dictionaries become null at every copy depth; indirect Type names check each reference generation with iterative cycle detection and a 64-reference limit; stale Type references preserve unrelated metadata; a saved/reopened three-page fixture verifies small output and retained unrelated metadata. Appearances and source-document links are not carried; FDF import semantics are unchanged. XFDF exports retain tabs and line breaks in comment identities and metadata."
 
 [[feature]]
 id = "comment.export-selected"
@@ -4392,8 +4392,8 @@ milestone = "M3"
 status = "shipped"
 commands = []
 tools = []
-evidence = ["crates/ui-egui/tests/view.rs::highlight_fields_tints_the_field_area", "crates/ui-egui/tests/view.rs::required_radio_buttons_get_a_round_red_border", "crates/ui-egui/tests/view.rs::field_highlighting_is_remembered"]
-notes = "remembered for the next document and session; required fields get a red border (round for radio buttons); the tint is drawn over the field, where Acrobat paints the highlight colour behind it"
+evidence = ["crates/ui-egui/tests/view.rs::highlight_fields_tints_the_field_area", "crates/ui-egui/tests/view.rs::required_radio_buttons_get_a_round_red_border", "crates/ui-egui/tests/view.rs::field_highlighting_is_remembered", "crates/ui-egui/tests/editing.rs::a_secured_form_shows_its_form_notice_and_its_security"]
+notes = "offered on secured forms too; remembered for the next document and session; required fields get a red border (round for radio buttons); the tint is drawn over the field, where Acrobat paints the highlight colour behind it"
 
 [[feature]]
 id = "form.field-appearance-display"
@@ -4524,8 +4524,8 @@ milestone = "M6"
 status = "shipped"
 commands = ["form.field.properties"]
 tools = ["form_set_props", "form_fill"]
-evidence = ["crates/forms/src/af.rs::dates_times_and_masks", "crates/forms/src/tests.rs::formats_validation_and_calculations_run_like_acrobat"]
-notes = "AFDate_FormatEx/KeystrokeEx, AFDate_Format presets, AFTime_Format(Ex): lenient parsing, month and day names, impossible dates refused"
+evidence = ["crates/forms/src/af.rs::dates_times_and_masks", "crates/forms/src/tests.rs::formats_validation_and_calculations_run_like_acrobat", "crates/forms/src/af.rs::digits_typed_without_separators_fill_adjacent_fields"]
+notes = "AFDate_FormatEx/KeystrokeEx, AFDate_Format presets, AFTime_Format(Ex): lenient parsing, month and day names, impossible dates refused; digits typed without separators fill fields the format writes side by side by their fixed widths (20261018 for yyyymmdd, 1430 for HHMM). A run of digits is split only where the format itself has no separator: 20261018 typed into a yyyy-mm-dd field is still refused"
 
 [[feature]]
 id = "form.af-special"
@@ -4620,8 +4620,8 @@ milestone = "M6"
 status = "shipped"
 commands = []
 tools = ["form_fill"]
-evidence = ["crates/ui-egui/tests/forms.rs::date_fields_offer_a_calendar"]
-notes = "a month calendar under date fields; the pick is written in the field's own date format"
+evidence = ["crates/ui-egui/tests/forms.rs::date_fields_offer_a_calendar", "crates/ui-egui/tests/forms.rs::the_calendar_follows_a_complete_date_typed_while_it_is_open"]
+notes = "a month calendar under date fields; the pick is written in the field's own date format; it opens on the field's date and moves to a whole date typed while it is open, staying on the month its arrows turned to otherwise"
 
 [[feature]]
 id = "form.auto-complete"
@@ -4692,8 +4692,8 @@ milestone = "M6"
 status = "shipped"
 commands = ["form.export_data"]
 tools = ["doc_export_data"]
-evidence = ["crates/xfdf/src/tests.rs::xfdf_round_trips_comments_and_values", "crates/automation/tests/automation.rs::comments_and_form_data_travel_as_xfdf_fdf_and_text", "crates/xfdf/src/tests.rs::xml_exports_preserve_whitespace_in_field_names"]
-notes = "XFDF, FDF; XFA forms also export their data as XML or XDP (form.xfa-data); XML/XFDF exports retain tabs and line breaks in field identities through character references."
+evidence = ["crates/xfdf/src/tests.rs::fdf_export_counts_emitted_field_values_before_allocating_lists", "crates/xfdf/src/tests.rs::xfdf_round_trips_comments_and_values", "crates/automation/tests/automation.rs::comments_and_form_data_travel_as_xfdf_fdf_and_text", "crates/xfdf/src/tests.rs::xml_exports_preserve_whitespace_in_field_names"]
+notes = "XFDF, FDF; FDF counts emitted field values, including every multi-select list entry, before allocating the output list and refuses exports beyond its shared 100,000-value budget. Existing source-field parsing limits remain unchanged. XFA forms also export their data as XML or XDP (form.xfa-data). XML/XFDF exports retain tabs and line breaks in field identities through character references."
 
 [[feature]]
 id = "form.data-xml-csv-txt"
@@ -5221,7 +5221,7 @@ status = "partial"
 commands = ["file.open"]
 tools = ["doc_open", "doc_info", "form_fields", "form_fill", "js_run"]
 evidence = ["crates/xfa/src/tests.rs::layout_places_captions_fields_and_sizes_containers_to_their_content", "crates/xfa/src/tests.rs::tables_break_across_pages_and_repeat_their_header_row", "crates/xfa/src/tests.rs::rendering_into_the_pdf_replaces_the_placeholder_page_and_adds_fields", "crates/engine/src/tests.rs::dynamic_xfa_forms_are_laid_out_on_open_filled_and_saved_incrementally", "crates/automation/tests/automation.rs::dynamic_xfa_forms_open_render_fill_and_save_through_tools", "crates/ui-egui/tests/ui_group/xfa.rs::a_dynamic_xfa_form_is_laid_out_and_filled", "crates/xfa/src/tests.rs::nested_width_less_subforms_lay_out_in_polynomial_time", "crates/js/src/tests.rs::instance_managers_add_remove_and_count", "crates/xfa/src/tests.rs::the_form_tree_carries_values_presence_instances_and_the_events", "crates/engine/src/tests.rs::xfa_scripts_initialize_calculate_validate_toggle_and_add_rows", "crates/automation/tests/automation.rs::xfa_scripts_run_for_buttons_and_field_changes_through_tools", "crates/ui-egui/tests/ui_group/xfa.rs::xfa_buttons_run_their_scripts_in_the_app", "crates/engine/src/tests.rs::hostile_xfa_open_scripts_are_merged_capped_kept_from_printing_and_noted", "crates/engine/src/tests.rs::runaway_xfa_calculations_at_open_end_quickly_with_a_report", "crates/ui-egui/tests/ui_group/xfa.rs::a_form_whose_scripts_were_turned_off_at_open_says_so", "crates/ui-egui/tests/ui_group/xfa.rs::scripts_turned_off_by_a_click_bring_a_closed_notice_bar_back", "crates/automation/tests/automation.rs::doc_info_says_when_a_runaway_script_turned_the_forms_scripts_off", "crates/xfa/src/tests.rs::the_live_form_of_nested_repeating_subforms_stops_at_its_node_budget", "crates/xfa/src/tests.rs::data_ops_of_one_event_are_one_datasets_rewrite", "crates/xfa/src/tests.rs::choice_lists_signatures_passwords_and_pictures_become_fields_and_images", "crates/xfa/src/tests.rs::choice_values_come_from_the_data_as_saved_values_and_several_for_lists", "crates/xfa/src/tests.rs::pictures_are_sized_from_their_headers_and_hostile_ones_are_refused_unallocated", "crates/engine/src/tests.rs::xfa_choice_lists_signature_and_picture_fields_open_fill_script_and_save", "crates/xfa/src/tests.rs::repeating_subforms_inside_positioned_content_get_their_instances", "crates/engine/src/tests.rs::xfa_rows_in_areas_are_laid_out_read_calculated_and_written_where_adobe_binds_them", "crates/xfa/src/tests.rs::page_area_without_occur_serves_every_body_page", "apps/pdfcraft-cli/tests/xfa.rs::info_reports_the_laid_out_pages_and_fields", "apps/pdfcraft-cli/tests/xfa.rs::text_reads_the_layout_including_a_page_absent_from_the_placeholder", "apps/pdfcraft-cli/tests/xfa.rs::render_matches_the_engine_layout_on_the_second_page", "apps/pdfcraft-cli/tests/xfa.rs::a_laid_out_form_keeps_the_original_copy_permissions"]
-notes = "laid out from the template on open by the xfa crate (positioned, tb, lr-tb, table/row, page masters (a page area with no occur repeats without limit, one with occur max=1 is used once, one with occur min=1 the body never reached gets a page after the body, as Acrobat Pro shows the public ISCIII form), breaks, repeated header rows, captions, rich text, JPEG/PNG/GIF images) into real pages and AcroForm fields (text, password, date with AFDate formats, check boxes, radio groups, drop-downs and list boxes with shown/saved item pairs and multi-select, signature fields, image fields showing their picture (pictures decoded once per document, at most 20 million pixels, and reused across re-layouts), buttons with reset/print/save/URL), filled from the datasets packet (including rows another viewer added), saved as an incremental revision with the values merged into the datasets so Adobe's viewers show them; doc_info reports xfa_layout. CLI info reports the laid-out page/field counts and dimensions while retaining the input file size and raw counts as pdf_pages/acroform_fields; text and render use those pages too, preserving copy permissions and leaving the source file unchanged (#1645). XFA JavaScript and FormCalc (form.xfa-formcalc) run in the js crate's XFA object model (xfa.form, SOM resolution, rawValue, presence, access, instance managers, xfa.host, xfa.layout, xfa.event): initialize and calculate on open, exit, validate and calculate after a field changes, click for buttons (through js_run and the app), with rows added and removed, subforms shown and hidden, and the form laid out again, all as one undo step and kept in the file. All the scripts of one event run on one thread, each in a fresh context on the form as the engine holds it then (nothing shared between scripts; the live form kept up to date in place for values, rebuilt only when the structure changed), so hundreds of calculations run within the open budget. Hostile scripts are bounded per event (merged and capped effects, messages and console lines, lower loop limits and a time budget on open and calculate, one datasets rewrite per event, print/save/links/focus from clicks only, a runaway script abandoned and the form's scripts turned off, which the app says in a toast and on the notice bar, with a button to the JavaScript console, and doc_info reports as xfa_scripts_off) and what open-time scripts changed is noted. Missing: a page area's relevant=\"-print\" (Acrobat still prints the page but leaves it blank; PdfCraft prints its content, #2574); loops inside nested calls are only stopped by abandoning their thread, and script memory is not capped; the change event per keystroke; xfa.template, connections and data descriptions; a hidden instance of a repeating subform hides them all; barcodes are drawn as their text, not bars; keep rules; metrics are approximate and Acrobat fidelity is eyeballed on real forms, not measured (#60)"
+notes = "laid out from the template on open by the xfa crate (positioned, tb, lr-tb, table/row, page masters (a page area with no occur repeats without limit, one with occur max=1 is used once, one with occur min=1 the body never reached gets a page after the body, as Acrobat Pro does on a synthetic form), breaks, repeated header rows, captions, rich text, JPEG/PNG/GIF images) into real pages and AcroForm fields (text, password, date with AFDate formats, check boxes, radio groups, drop-downs and list boxes with shown/saved item pairs and multi-select, signature fields, image fields showing their picture (pictures decoded once per document, at most 20 million pixels, and reused across re-layouts), buttons with reset/print/save/URL), filled from the datasets packet (including rows another viewer added), saved as an incremental revision with the values merged into the datasets so Adobe's viewers show them; doc_info reports xfa_layout. CLI info reports the laid-out page/field counts and dimensions while retaining the input file size and raw counts as pdf_pages/acroform_fields; text and render use those pages too, preserving copy permissions and leaving the source file unchanged (#1645). XFA JavaScript and FormCalc (form.xfa-formcalc) run in the js crate's XFA object model (xfa.form, SOM resolution, rawValue, presence, access, instance managers, xfa.host, xfa.layout, xfa.event): initialize and calculate on open, exit, validate and calculate after a field changes, click for buttons (through js_run and the app), with rows added and removed, subforms shown and hidden, and the form laid out again, all as one undo step and kept in the file. All the scripts of one event run on one thread, each in a fresh context on the form as the engine holds it then (nothing shared between scripts; the live form kept up to date in place for values, rebuilt only when the structure changed), so hundreds of calculations run within the open budget. Hostile scripts are bounded per event (merged and capped effects, messages and console lines, lower loop limits and a time budget on open and calculate, one datasets rewrite per event, print/save/links/focus from clicks only, a runaway script abandoned and the form's scripts turned off, which the app says in a toast and on the notice bar, with a button to the JavaScript console, and doc_info reports as xfa_scripts_off) and what open-time scripts changed is noted. Missing: a page area's relevant=\"-print\" (on a synthetic form Acrobat still prints the page but leaves it blank; PdfCraft prints its content, #2574); a page break before the first section (Acrobat opens an empty body page first when the first section has breakBefore targetType=pageArea, with or without startNew, as seen on synthetic forms; PdfCraft skips a break on an empty page and lays out one page fewer, #2574); loops inside nested calls are only stopped by abandoning their thread, and script memory is not capped; the change event per keystroke; xfa.template, connections and data descriptions; a hidden instance of a repeating subform hides them all; barcodes are drawn as their text, not bars; keep rules; metrics are approximate and Acrobat fidelity is eyeballed on real forms, not measured (#60)"
 
 [[feature]]
 id = "form.xfa-formcalc"
@@ -5704,8 +5704,8 @@ milestone = "M8"
 status = "shipped"
 commands = ["redact.apply"]
 tools = ["redact_apply"]
-evidence = ["crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared"]
-notes = "covered pixels cleared in a copy; DCT/JPX/JBIG2/CCITT images removed whole"
+evidence = ["crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared", "crates/redact/src/tests.rs::redaction_clears_pixels_intersected_without_covering_their_centres"]
+notes = "intersected pixel footprints are cleared conservatively in a copy; DCT/JPX/JBIG2/CCITT images removed whole"
 
 [[feature]]
 id = "protect.redact-vectors"
@@ -5912,8 +5912,8 @@ milestone = "M9"
 status = "shipped"
 commands = ["sign.digital", "sign.certify"]
 tools = ["sign_windows_ids", "sign_document"]
-evidence = ["crates/sign/tests/pdf.rs::signing_with_windows_store_identities", "crates/sign/tests/pdf.rs::a_windows_store_identity_signs_with_its_issuers", "crates/sign/tests/pdf.rs::windows_store_enumeration_and_missing_identity", "crates/automation/tests/automation.rs::digital_ids_signing_and_validation_through_tools", "crates/ui-egui/tests/signing.rs::windows_store_identity_does_not_ask_for_a_file_password", "crates/ui-egui/tests/signing.rs::an_unusable_id_is_shown_with_its_reason_and_cannot_be_chosen"]
-notes = "Current User Personal (My) CNG identities: RSA PKCS #1 v1.5 and DER-encoded ECDSA P-256/P-384. Keys never leave Windows; windows:<fingerprint|common name> for agents and Windows store labels in the desktop ID picker. The signature embeds the issuers Windows chains the certificate to. Store certificates that can't sign (no private key, another key type, a key CNG can't open) are reported with the reason and Windows error code (greyed in the picker, `unusable` in sign_windows_ids) rather than left out; keys that need a prompt to open are listed and prompt at signing. Tested with throwaway software-backed RSA-2048, P-256 and P-384 certificates and a key-less certificate (run with --ignored). Smart cards and tokens whose driver registers a CNG key storage provider sign with the provider's own PIN dialog (checked by hand with a SafeNet token only; no hardware in CI); still missing: the Local Machine store, legacy CryptoAPI-only providers, P-521/Brainpool/Ed25519 keys, direct PKCS #11."
+evidence = ["crates/sign/tests/pdf.rs::signing_with_windows_store_identities", "crates/sign/tests/pdf.rs::a_windows_store_identity_signs_with_its_issuers", "crates/sign/tests/pdf.rs::windows_store_enumeration_and_missing_identity", "crates/automation/tests/automation.rs::digital_ids_signing_and_validation_through_tools", "crates/ui-egui/tests/signing.rs::windows_store_identity_does_not_ask_for_a_file_password", "crates/ui-egui/tests/signing.rs::an_unusable_id_is_shown_with_its_reason_and_cannot_be_chosen", "crates/sign/tests/chain.rs::a_smart_cards_certificates_that_may_not_sign_say_why_in_id_lists"]
+notes = "Current User Personal (My) CNG identities: RSA PKCS #1 v1.5 and DER-encoded ECDSA P-256/P-384. Keys never leave Windows; windows:<fingerprint|common name> for agents and Windows store labels in the desktop ID picker. The signature embeds the issuers Windows chains the certificate to. Store certificates that can't sign (no private key, another key type, a key CNG can't open, or a key usage or extended key usage that doesn't allow signing documents, like a CAC's encryption and logon certificates) are reported with the reason and Windows error code (greyed in the picker, `unusable` in sign_windows_ids) rather than left out; keys that need a prompt to open are listed and prompt at signing. Tested with throwaway software-backed RSA-2048, P-256 and P-384 certificates and a key-less certificate (run with --ignored). Smart cards and tokens whose driver registers a CNG key storage provider sign with the provider's own PIN dialog (checked by hand with a SafeNet token only; no hardware in CI); still missing: the Local Machine store, legacy CryptoAPI-only providers, P-521/Brainpool/Ed25519 keys, direct PKCS #11."
 
 [[feature]]
 id = "sign.encrypted-documents"
@@ -7088,8 +7088,8 @@ milestone = "M10"
 status = "partial"
 commands = ["export.html"]
 tools = ["doc_export_office"]
-evidence = ["crates/export/src/lib.rs::html_has_headings_paragraphs_and_images_in_order", "crates/export/src/lib.rs::text_colour_survives_every_format", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf"]
-notes = "Single HTML file with headings, paragraphs (with text colour), inline images, and detected tables with spans/empty cells. Not yet: multi-page folder output, CSS from fonts."
+evidence = ["crates/export/src/lib.rs::html_has_headings_paragraphs_and_images_in_order", "crates/export/src/lib.rs::text_colour_survives_every_format", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf", "crates/automation/tests/automation.rs::exporting_office_files_says_which_pages_left_form_text_out", "crates/edit/src/tests.rs::reading_follows_forms_as_far_as_the_renderer_and_says_where_it_stops"]
+notes = "Single HTML file with headings, paragraphs (with text colour), inline images, and detected tables with spans/empty cells. Text and images in form XObjects are read 50 levels deep, as the renderer does, and up to 50 000 forms a page; the tool lists pages past that in truncated_pages, with a warning (#3120). Not yet: multi-page folder output, CSS from fonts."
 
 [[feature]]
 id = "create.export-text"
@@ -7776,7 +7776,7 @@ milestone = "M11"
 status = "partial"
 commands = ["standards.pdfa"]
 tools = ["pdfa_verify"]
-evidence = ["crates/preflight/src/tests.rs::verify_reports_what_breaks_pdfa", "crates/preflight/src/tests.rs::convert_fixes_all_but_fonts", "crates/preflight/src/tests.rs::verify_reports_an_output_intent_that_does_not_match_device_colour", "crates/automation/tests/automation.rs::pdfa_through_tools", "crates/ui-egui/tests/compare.rs::pdfa_dialog_verifies_and_converts"]
+evidence = ["crates/preflight/src/tests.rs::verify_reports_what_breaks_pdfa", "crates/preflight/src/tests.rs::standards_identification_uses_namespace_not_prefix", "crates/preflight/src/tests.rs::convert_fixes_all_but_fonts", "crates/preflight/src/tests.rs::verify_reports_an_output_intent_that_does_not_match_device_colour", "crates/automation/tests/automation.rs::pdfa_through_tools", "crates/ui-egui/tests/compare.rs::pdfa_dialog_verifies_and_converts"]
 notes = "PDF/A-2b/3b structural rules: identification, encryption, output intent (present, and RGB/CMYK to match DeviceRGB/DeviceCMYK use), fonts embedded, annotations, actions, images, embedded files. Not yet: content-stream operator checks, transparency details, PDF/A-1 and -4, a veraPDF comparison."
 
 [[feature]]

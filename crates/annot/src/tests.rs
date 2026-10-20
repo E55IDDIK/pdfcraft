@@ -1335,3 +1335,50 @@ fn text_box_font_size_changes_the_da_and_grows_the_box() {
         assert_eq!(props(&doc, 0, i).unwrap().font_size, None);
     }
 }
+
+#[test]
+fn text_boxes_and_callouts_can_change_fill_and_border() {
+    let mut doc = fixture();
+    let shapes = [
+        Shape::TextBox { rect: [300.0, 600.0, 500.0, 660.0], font_size: 12.0 },
+        Shape::Callout {
+            rect: [300.0, 600.0, 500.0, 660.0],
+            knee: [260.0, 560.0],
+            point: [200.0, 520.0],
+            font_size: 12.0,
+            ending: LineEnding::OpenArrow,
+        },
+    ];
+    for shape in shapes {
+        let index = add_annotation(&mut doc, &new(0, shape), &meta("test")).unwrap();
+        assert!(props(&doc, 0, index).unwrap().fillable);
+        set_fill(&mut doc, 0, index, Some([1.0, 1.0, 1.0]), &meta("test")).unwrap();
+        set_style(&mut doc, 0, index, None, None, Some(3.0), None, &meta("test")).unwrap();
+        let saved = reopen(&doc);
+        let properties = props(&saved, 0, index).unwrap();
+        assert_eq!(properties.fill, Some([1.0; 3]));
+        assert_eq!(properties.width, Some(3.0));
+        let ap = ap_content(&saved, &list(&saved, 0)[index]);
+        assert!(ap.contains("1 1 1 rg") && ap.contains(" re f") && ap.contains("3 w"), "{ap}");
+        set_fill(&mut doc, 0, index, None, &meta("test")).unwrap();
+        assert_eq!(props(&doc, 0, index).unwrap().fill, None);
+    }
+}
+
+#[test]
+fn free_text_properties_show_legacy_or_absent_border_width() {
+    let mut doc = fixture();
+    let index = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [100.0, 100.0, 200.0, 140.0], font_size: 12.0 }), &meta("test")).unwrap();
+    let (_, reference) = annot_ref(&mut doc, 0, index).unwrap();
+    doc.update_dict(reference, |d| {
+        d.remove(b"BS");
+        d.remove(b"Border");
+    })
+    .unwrap();
+    assert_eq!(props(&doc, 0, index).unwrap().width, Some(0.0));
+    doc.update_dict(reference, |d| {
+        d.set(b"Border".to_vec(), Object::Array([0.0, 0.0, 4.0].into_iter().map(Object::Real).collect()));
+    })
+    .unwrap();
+    assert_eq!(props(&doc, 0, index).unwrap().width, Some(4.0));
+}

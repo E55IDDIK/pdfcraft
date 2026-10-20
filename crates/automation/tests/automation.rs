@@ -5282,6 +5282,74 @@ fn exporting_to_word_html_and_rtf() {
     assert!(a.call("doc_export_office", &json!({ "doc": doc, "path": "a.xyz" })).is_err());
 }
 
+/// #3120: a PDF whose pages draw "Head", then a chain of `depths[page]` nested forms whose
+/// innermost writes "TAIL".
+fn nested_forms_pdf(depths: &[usize]) -> Vec<u8> {
+    let mut objs: Vec<String> =
+        vec!["<< /Type /Catalog /Pages 2 0 R >>".into(), String::new(), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
+    let mut kids = Vec::new();
+    for &depth in depths {
+        // The object number of D1, D2 and so on.
+        let first = objs.len() + 1;
+        let xobjects: String = (1..=depth).map(|i| format!("/D{i} {} 0 R ", first + i - 1)).collect();
+        let resources = format!("<< /Font << /F1 3 0 R >> /XObject << {xobjects}>> >>");
+        for i in 1..=depth {
+            let body = if i == depth { "BT /F1 24 Tf 20 150 Td (TAIL) Tj ET".to_string() } else { format!("/D{} Do", i + 1) };
+            objs.push(format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 300] /Resources {resources} /Length {} >>\nstream\n{body}\nendstream",
+                body.len()
+            ));
+        }
+        let body = "BT /F1 24 Tf 20 250 Td (Head) Tj ET /D1 Do";
+        objs.push(format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len()));
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /Contents {} 0 R /Resources {resources} >>", objs.len()));
+        kids.push(format!("{} 0 R", objs.len()));
+    }
+    objs[1] = format!("<< /Type /Pages /Kids [{}] /Count {} /MediaBox [0 0 200 300] >>", kids.join(" "), kids.len());
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// #3120: export reads forms as deeply nested as the renderer draws them (13 used to lose their
+/// text), and its result says which pages draw forms past that, whose text is missing.
+#[test]
+fn exporting_office_files_says_which_pages_left_form_text_out() {
+    use pdfcraft_engine::compare::{MAX_FORM_DEPTH, MAX_FORM_VISITS};
+    let dir = workdir("office-forms");
+    std::fs::write(dir.join("deep.pdf"), nested_forms_pdf(&[13, MAX_FORM_DEPTH + 1, MAX_FORM_DEPTH])).unwrap();
+    std::fs::write(dir.join("fine.pdf"), nested_forms_pdf(&[13])).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "deep.pdf" }))["doc"].as_u64().unwrap();
+    for ext in ["html", "docx"] {
+        let r = ok(&mut a, "doc_export_office", json!({ "doc": doc, "path": format!("deep.{ext}") }));
+        assert_eq!((&r["truncated"], &r["truncated_pages"]), (&json!(true), &json!([2])), "{r}");
+        let warning = r["warnings"][0].as_str().unwrap();
+        assert!(warning.contains(&format!("{MAX_FORM_DEPTH} deep")) && warning.contains(&MAX_FORM_VISITS.to_string()), "{warning}");
+        assert!(warning.contains("truncated_pages"), "{warning}");
+    }
+    let html = std::fs::read_to_string(dir.join("deep.html")).unwrap();
+    let tails: Vec<usize> = html.split("<hr>").map(|page| page.matches("TAIL").count()).collect();
+    assert_eq!(tails, [1, 0, 1], "{html}");
+    assert_eq!(html.matches("Head").count(), 3, "{html}");
+
+    let fine = ok(&mut a, "doc_open", json!({ "path": "fine.pdf" }))["doc"].as_u64().unwrap();
+    let r = ok(&mut a, "doc_export_office", json!({ "doc": fine, "path": "fine.html" }));
+    assert_eq!((&r["truncated"], &r["truncated_pages"]), (&json!(false), &json!([])), "{r}");
+    assert!(r.get("warnings").is_none(), "{r}");
+    assert!(std::fs::read_to_string(dir.join("fine.html")).unwrap().contains("TAIL"));
+}
+
 /// #773: a diagonal watermark must not enter the body flow or move invoice fields.
 #[test]
 fn exporting_an_invoice_to_word_keeps_the_watermark_out_of_flow() {
@@ -6696,4 +6764,94 @@ fn a_root_less_write_output_is_atomic_too() {
     let e = free.write_output(&dir.join("new").to_string_lossy(), &[4]).unwrap_err();
     assert!(matches!(&e, ToolError::Failed(m) if m.contains("is a folder")), "{e:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fdf_nested_comment_values_survive_export_import_and_save_through_tools() {
+    use pdfcraft_cos::{Dict, Document, Object, PdfString, SaveOptions, write_full};
+    use std::sync::Arc;
+    let dir = workdir("fdf-nested-values");
+    let mut source = Document::open(Arc::new(fixture(1))).unwrap();
+    let page = pdfcraft_model::pages(&source)[0].obj;
+    let mut note = Dict::new();
+    note.set(b"Type".to_vec(), Object::name("Annot"));
+    note.set(b"Subtype".to_vec(), Object::name("Square"));
+    note.set(b"NM".to_vec(), PdfString::text("nested-values"));
+    note.set(b"Rect".to_vec(), Object::Array([10, 20, 30, 40].map(|value| Object::Ref(source.add(Object::Int(value)))).into()));
+    note.set(b"C".to_vec(), Object::Array([0.25, 0.5, 0.75].map(|value| Object::Ref(source.add(Object::Real(value)))).into()));
+    let note = source.add(note);
+    source.update_dict(page, |dict| dict.set(b"Annots".to_vec(), Object::Array(vec![Object::Ref(note)]))).unwrap();
+    std::fs::write(dir.join("source.pdf"), write_full(&source, &SaveOptions::default()).unwrap()).unwrap();
+    let mut a = auto(&dir);
+    let source = ok(&mut a, "doc_open", json!({ "path": "source.pdf" }))["doc"].as_u64().unwrap();
+
+    ok(&mut a, "doc_export_data", json!({ "doc": source, "path": "notes.fdf", "what": "comments" }));
+    let target = ok(&mut a, "doc_open", json!({ "path": "b.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_import_data", json!({ "doc": target, "path": "notes.fdf" }));
+    ok(&mut a, "doc_save", json!({ "doc": target, "path": "restored.pdf" }));
+    let reopened = ok(&mut a, "doc_open", json!({ "path": "restored.pdf" }))["doc"].as_u64().unwrap();
+    let after = ok(&mut a, "comment_list", json!({ "doc": reopened }));
+    // The saved input has legal indirect scalar numbers. The engine's source inspection
+    // currently reads those as defaults, so compare the restored data to the fixture's
+    // known values (converted from PDF bottom-left to the tool's top-left coordinates).
+    assert_eq!(after["comments"][0]["rect"], json!([10.0, 260.0, 30.0, 280.0]));
+    assert_eq!(after["comments"][0]["color"], "#4080BF");
+}
+
+#[test]
+fn refused_fdf_export_keeps_the_destination_and_source_through_tools() {
+    use pdfcraft_cos::{Dict, Document, Object, SaveOptions, write_full};
+    use std::sync::Arc;
+    let dir = workdir("fdf-export-limit");
+    let mut source = Document::open(Arc::new(fixture(1))).unwrap();
+    let page = pdfcraft_model::pages(&source)[0].obj;
+    let mut note = Dict::new();
+    note.set(b"Type".to_vec(), Object::name("Annot"));
+    note.set(b"Subtype".to_vec(), Object::name("Square"));
+    note.set(b"Rect".to_vec(), Object::Array(vec![10.into(), 20.into(), 30.into(), 40.into()]));
+    note.set(b"PCData".to_vec(), Object::Array(vec![Object::Null; 100_001]));
+    let note = source.add(note);
+    source.update_dict(page, |dict| dict.set(b"Annots".to_vec(), Object::Array(vec![Object::Ref(note)]))).unwrap();
+    let bytes = write_full(&source, &SaveOptions::default()).unwrap();
+    std::fs::write(dir.join("source.pdf"), &bytes).unwrap();
+    std::fs::write(dir.join("notes.fdf"), b"existing destination").unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "source.pdf" }))["doc"].as_u64().unwrap();
+    let before = ok(&mut a, "comment_list", json!({ "doc": doc }));
+    let error = a.call("doc_export_data", &json!({ "doc": doc, "path": "notes.fdf", "what": "comments" })).unwrap_err();
+    assert!(error.to_string().contains("100,000 values"), "{error}");
+    assert_eq!(std::fs::read(dir.join("notes.fdf")).unwrap(), b"existing destination");
+    assert_eq!(std::fs::read(dir.join("source.pdf")).unwrap(), bytes);
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": doc })), before);
+}
+
+#[test]
+fn text_box_and_callout_fill_and_border_through_tools() {
+    let dir = workdir("textbox-fill");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    for kind in ["textbox", "callout"] {
+        let mut args = json!({ "doc": doc, "page": 1, "type": kind, "rect": [80, 40, 180, 100], "contents": "Example" });
+        if kind == "callout" {
+            args["to"] = json!([20, 120]);
+        }
+        let added = ok(&mut a, "comment_add", args);
+        let comment = &added["comment"];
+        ok(&mut a, "comment_edit", json!({ "doc": doc, "page": 1, "index": comment["index"], "fill": "white", "width": 3 }));
+    }
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "filled.pdf" }));
+    let mut session = pdfcraft_engine::Session::new();
+    let bytes = std::sync::Arc::new(std::fs::read(dir.join("filled.pdf")).unwrap());
+    let saved = session.open("filled.pdf", None, bytes, None).unwrap();
+    for index in 0..2 {
+        let props = session.get(saved).unwrap().comment_props(0, index).unwrap();
+        assert_eq!((props.fill, props.width), (Some([1.0; 3]), Some(3.0)));
+        ok(&mut a, "comment_edit", json!({ "doc": doc, "page": 1, "index": index + 1, "fill": "none" }));
+    }
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "transparent.pdf" }));
+    let bytes = std::sync::Arc::new(std::fs::read(dir.join("transparent.pdf")).unwrap());
+    let saved = session.open("transparent.pdf", None, bytes, None).unwrap();
+    for index in 0..2 {
+        assert_eq!(session.get(saved).unwrap().comment_props(0, index).unwrap().fill, None);
+    }
 }

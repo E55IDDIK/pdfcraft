@@ -1566,3 +1566,82 @@ fn two_up_scroll_end_reaches_an_unpaired_final_page() {
 fn two_up_scroll_end_with_cover_reaches_a_taller_left_page() {
     assert_final_spread_bottom_reachable(&[400, 400, 400, 400, 100], true);
 }
+
+#[test]
+fn switching_modes_keeps_the_current_page_at_fixed_zoom() {
+    use egui_kittest::kittest::Queryable;
+    let kids = (3..33).map(|i| format!("{i} 0 R")).collect::<Vec<_>>().join(" ");
+    let mut pdf = format!(
+        "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [{kids}] /Count 30 /MediaBox [0 0 300 400] >> endobj\n"
+    );
+    for i in 3..33 {
+        pdf.push_str(&format!("{i} 0 obj << /Type /Page /Parent 2 0 R >> endobj\n"));
+    }
+    pdf.push_str("trailer << /Root 1 0 R >>\n%%EOF");
+    let other = pdf.clone().into_bytes();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("pages.pdf", None, pdf.into_bytes()).unwrap();
+        app.set_option("zoom", "100").unwrap();
+        app
+    });
+    h.run_steps(8);
+    h.state_mut().views[0].go_to_page(17);
+    h.run_steps(8);
+    assert_eq!(h.state().views[0].current, 17);
+    h.hover_at(h.state().views[0].viewport_rect().center());
+    h.event(wheel(MouseWheelUnit::Point, -35.0, TouchPhase::Move));
+    h.run_steps(8);
+    let before = rect(&h, 17).unwrap().top() - h.state().views[0].viewport_rect().top();
+    h.get_by_label("Read").click();
+    h.run_steps(8);
+    assert_eq!(h.state().views[0].current, 17, "switching to Read should keep the current page");
+    let after = rect(&h, 17).unwrap().top() - h.state().views[0].viewport_rect().top();
+    assert!((before - after).abs() < 1.0, "the position within the page moved: {before} to {after}");
+    h.state_mut().views[0].go_to_page(5);
+    h.run_steps(8);
+    assert_eq!(h.state().views[0].current, 5);
+    h.get_by_label("All tools").click();
+    h.run_steps(8);
+    assert_eq!(h.state().views[0].current, 5, "switching to All tools should keep the current page");
+    h.state_mut().open_bytes("other.pdf", None, other).unwrap();
+    h.state_mut().set_option("zoom", "100").unwrap();
+    h.run_steps(8);
+    h.state_mut().views[1].go_to_page(9);
+    h.run_steps(8);
+    assert_eq!(h.state().views[1].current, 9);
+    h.get_by_label("pages.pdf").click();
+    h.run_steps(8);
+    assert_eq!(h.state().views[0].current, 5, "the first tab keeps its own position");
+    h.get_by_label("other.pdf").click();
+    h.run_steps(8);
+    assert_eq!(h.state().views[1].current, 9, "the second tab keeps its own position");
+}
+
+#[test]
+fn long_view_menu_fits_a_short_window() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 400.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("pages.pdf", None, PAGES.to_vec()).unwrap();
+        app
+    });
+    h.run_steps(8);
+    h.get_by_label("Menu").click();
+    h.run_steps(2);
+    h.get_by_label("View ⏵").hover();
+    h.run_steps(4);
+    let before = h.get_by_label("Side panels ⏵").rect().bottom();
+    h.get_by_label("Fit to height ").hover();
+    h.event(wheel(MouseWheelUnit::Point, -1000.0, TouchPhase::Move));
+    h.run_steps(6);
+    let after = h.get_by_label("Side panels ⏵").rect().bottom();
+    assert!(after < before && after <= 400.0, "menu did not scroll into view: {before} -> {after}");
+    h.get_by_label("Side panels ⏵").hover();
+    h.run_steps(4);
+    h.get_all_by_label("Bookmarks").last().unwrap().click();
+    h.run_steps(4);
+    assert_eq!(h.state().right, Some(pdfcraft_ui_egui::RightPanel::Bookmarks));
+}

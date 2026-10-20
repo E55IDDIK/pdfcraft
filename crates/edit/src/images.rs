@@ -300,7 +300,7 @@ pub fn reading_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, Edi
     /// The forms being read (cycle guard) and how many were entered (the page's budget).
     struct Forms {
         path: Vec<ObjRef>,
-        visits: usize,
+        budget: crate::text::FormBudget,
     }
     fn walk(
         doc: &Document,
@@ -317,7 +317,7 @@ pub fn reading_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, Edi
             let ctm = st.placement.matrix;
             if op.is("Do") {
                 let Some(name) = op.name(0) else { continue };
-                if let Some(form) = crate::text::form_call(doc, resources, name, ctm, &forms.path, &mut forms.visits) {
+                if let Some(form) = crate::text::form_call(doc, resources, name, ctm, &forms.path, &mut forms.budget) {
                     if let Some(r) = form.obj {
                         forms.path.push(r);
                     }
@@ -367,7 +367,7 @@ pub fn reading_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, Edi
     let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut out = Vec::new();
     let mut st = ImageState::new(Matrix::IDENTITY, p.crop(doc), Vec::new());
-    let mut forms = Forms { path: Vec::new(), visits: 0 };
+    let mut forms = Forms { path: Vec::new(), budget: crate::text::FormBudget::default() };
     let pieces = joined(&streams(doc, &p.dict));
     walk(doc, &pieces.parse().ops, &res, &mut st, &|op| pieces.piece_of(op.span.start), &mut forms, &mut out)?;
     Ok(out)

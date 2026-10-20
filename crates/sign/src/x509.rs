@@ -384,6 +384,15 @@ impl Certificate {
         }
     }
 
+    /// [`signing_problem`](Self::signing_problem) as a clause that follows the certificate's
+    /// name ("it is not issued for signing documents (…)"), for lists of digital IDs.
+    pub fn signing_problem_clause(&self) -> Option<String> {
+        self.signing_problem().map(|d| match d.message.strip_prefix("The signer's certificate ") {
+            Some(rest) => format!("it {}", rest.strip_suffix('.').unwrap_or(rest)),
+            None => d.message,
+        })
+    }
+
     /// Issued by itself (subject = issuer and its own key verifies it).
     pub fn is_self_signed(&self) -> bool {
         self.issuer.raw == self.subject.raw && self.signed_by(&self.public_key)

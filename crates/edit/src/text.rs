@@ -68,6 +68,10 @@ pub struct TextLine {
     /// Some of the line's text is `/ActualText`, which is already in logical order: visual-order
     /// Indic recovery would scramble it.
     actual_text: bool,
+    /// Whether any of the line's runs draws in a clipping mode (`4 Tr` to `7 Tr`). The join below
+    /// does not require one rendering mode, so a line that starts as ink can continue as a mask;
+    /// [`refuse_clipping_text`] reads this rather than the origin's mode alone.
+    clips: bool,
 }
 
 impl TextLine {
@@ -635,6 +639,7 @@ struct Shown {
     glyph_count: usize,
     /// Advance in text space, including spacing and TJ adjustments.
     advance: f64,
+    tracking: f64,
     /// The text matrix where it starts (text space), and the state there and at its `BT`.
     tm: Matrix,
     tlm: Matrix,
@@ -699,6 +704,77 @@ impl Pen {
         let gap = start - self.end;
         let same_dir = (dir.0 - self.dir.0).abs() < 1e-3 && (dir.1 - self.dir.1).abs() < 1e-3;
         (same_dir && (across - self.across).abs() < self.size * 0.3 && gap > -self.size && gap < self.size * reach, gap)
+    }
+}
+
+/// Use the lower third of letter gaps, not word gaps. A pair of isolated labels is not
+/// evidence of tracking; unadjusted neighbours inside a string contribute zero too.
+/// The tracking a run of glyphs was set with: the lower third of its gaps, when that is at
+/// most half an em (`limit`). A wider "tracking" is word or cell spacing between one-glyph
+/// words (`a b c`, a column of digits or Y/N ticks), which must keep its spaces.
+fn typical_tracking(gaps: &mut [f64], limit: f64) -> f64 {
+    if gaps.len() < 3 {
+        return 0.0;
+    }
+    let at = gaps.len() / 3;
+    gaps.select_nth_unstable_by(at, f64::total_cmp);
+    gaps.get(at).copied().filter(|n| n.is_finite() && *n <= limit).unwrap_or(0.0).max(0.0)
+}
+
+fn tj_tracking(pieces: &[Object], metrics: &Metrics, size: f64, scale: f64) -> f64 {
+    let mut gaps = Vec::new();
+    let mut previous = false;
+    let mut gap = 0.0;
+    for piece in pieces {
+        if let Object::String(s) = piece {
+            for (code, len) in metrics.codes(&s.bytes) {
+                let blank = metrics.is_space(code, len) || metrics.text_of(code).is_some_and(|t| !t.is_empty() && t.chars().all(char::is_whitespace));
+                if previous && !blank {
+                    gaps.push(gap);
+                }
+                previous = !blank;
+                gap = 0.0;
+            }
+        } else if let Some(n) = piece.as_f64() {
+            gap += -n / 1000.0 * size * scale;
+        }
+    }
+    typical_tracking(&mut gaps, size * scale.abs() * 0.5)
+}
+
+fn positioned_tracking(shown: &mut [Shown]) {
+    let mut start = 0;
+    while start < shown.len() {
+        let mut end = start.saturating_add(1);
+        while let (Some(prev), Some(next)) = (shown.get(end.saturating_sub(1)), shown.get(end)) {
+            if prev.glyph_count != 1
+                || next.glyph_count != 1
+                || prev.font != next.font
+                || prev.scope != next.scope
+                || (prev.size - next.size).abs() > 0.01
+                || prev.state.char_spacing != next.state.char_spacing
+                || prev.state.scale != next.state.scale
+                || !Pen::after(prev).continues(next, 1.5).0
+            {
+                break;
+            }
+            end = end.saturating_add(1);
+        }
+        if let Some(run) = shown.get_mut(start..end) {
+            let mut gaps: Vec<f64> = run
+                .windows(2)
+                .filter_map(|pair| {
+                    let [prev, next] = pair else { return None };
+                    (!prev.text.trim().is_empty() && !next.text.trim().is_empty()).then(|| Pen::after(prev).continues(next, 0.0).1)
+                })
+                .collect();
+            let limit = run.first().map_or(0.0, |s| s.size * s.state.scale.abs() * 0.5);
+            let tracking = typical_tracking(&mut gaps, limit);
+            for s in run.iter_mut().skip(1) {
+                s.tracking = tracking;
+            }
+        }
+        start = end;
     }
 }
 
@@ -883,6 +959,8 @@ fn interpret(
                     b"TJ" => op.operands.first().and_then(Object::as_array).cloned().unwrap_or_default(),
                     _ => op.operands.last().cloned().into_iter().collect(),
                 };
+                // Tc is already included in the pen advance; TJ may encode tracking instead.
+                let tracking = if op.is("TJ") { tj_tracking(&pieces, &m, ts.size, ts.scale) } else { 0.0 };
                 let trm0 = tm.then(&ts.ctm);
                 let start = trm0.apply(0.0, ts.rise);
                 let mut text = String::new();
@@ -924,12 +1002,12 @@ fn interpret(
                             if let Some(n) = other.as_f64() {
                                 let dx = -n / 1000.0 * ts.size * ts.scale;
                                 // A large gap inside TJ reads as a space.
-                                if dx > ts.size * 0.2 && !text.ends_with(' ') {
+                                if dx - tracking > (ts.size * ts.scale).abs() * 0.2 && !text.ends_with(' ') {
                                     text.push(' ');
                                 }
-                                // Kerning keeps a word together; a jump either way of more
-                                // than 0.2 em ends it (whatever the sign of the size or `Tz`).
-                                if dx.abs() > (ts.size * ts.scale).abs() * 0.2 {
+                                // Tracking and kerning keep a word together; a larger jump
+                                // ends it (whatever the sign of the size or `Tz`).
+                                if dx - tracking > (ts.size * ts.scale).abs() * 0.2 || dx < -(ts.size * ts.scale).abs() * 0.2 {
                                     in_word = false;
                                 }
                                 x_text += dx;
@@ -976,6 +1054,7 @@ fn interpret(
                     extra_ops: Vec::new(),
                     glyph_count,
                     advance: x_text,
+                    tracking: 0.0,
                     tm: Matrix([tm.0[0], tm.0[1], tm.0[2], tm.0[3], tm.0[4] - x_text * tm.0[0], tm.0[5] - x_text * tm.0[1]]),
                     state: ts.clone(),
                     tlm,
@@ -1009,6 +1088,7 @@ fn interpret(
     carry.ts = ts;
     carry.stack = stack;
     carry.marked = marked;
+    positioned_tracking(&mut out);
     out
 }
 
@@ -1057,7 +1137,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
         });
         if joins && let Some(l) = lines.last_mut() {
             let gap = last.map_or(0.0, |(_, pen)| pen.continues(&s, 0.0).1);
-            if gap > l.size * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
+            if gap - s.tracking > l.size * s.state.scale.abs() * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
                 l.text.push(' ');
             }
             l.text.push_str(&s.text);
@@ -1069,6 +1149,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
             l.decodable &= s.decodable;
             l.visual_order |= s.visual_order;
             l.actual_text |= s.actual_text;
+            l.clips |= s.state.render_mode >= 4;
             // Spaces may use a separate subset font; they do not change the visible style.
         } else {
             lines.push(TextLine {
@@ -1089,6 +1170,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
                 scope: s.scope,
                 logical_order: s.logical_order,
                 actual_text: s.actual_text,
+                clips: s.state.render_mode >= 4,
                 ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
                 origin: Origin {
                     tm: s.tm.0,
@@ -1147,7 +1229,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
     });
     if joins && let Some(l) = lines.last_mut() {
         let gap = last.map_or(0.0, |pen| pen.continues(&s, 0.0).1);
-        if gap > l.size * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
+        if gap - s.tracking > l.size * s.state.scale.abs() * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
             l.text.push(' ');
         }
         l.text.push_str(&s.text);
@@ -1159,6 +1241,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
         l.decodable &= s.decodable;
         l.visual_order |= s.visual_order;
         l.actual_text |= s.actual_text;
+        l.clips |= s.state.render_mode >= 4;
     } else {
         lines.push(TextLine {
             text: s.text.clone(),
@@ -1178,6 +1261,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
             scope: s.scope,
             logical_order: s.logical_order,
             actual_text: s.actual_text,
+            clips: s.state.render_mode >= 4,
             ops: std::iter::once(s.op).chain(s.extra_ops.iter().copied()).collect(),
             origin: Origin {
                 tm: s.tm.0,
@@ -1195,13 +1279,27 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream
     *last = Some(Pen::after(&s));
 }
 
-/// How deep form XObjects nest before reading stops (they may also refer to themselves).
-pub(crate) const MAX_FORM_DEPTH: usize = 12;
+/// How deep form XObjects nest before reading stops (they may also refer to themselves). The
+/// renderer stops at the same depth, so export reads the text the page shows (#3120).
+pub const MAX_FORM_DEPTH: usize = 50;
 
 /// The most form XObjects one page's walk enters, at any depth. The depth cap alone still lets
-/// a form that draws another form many times fan out exponentially (100 `Do`s on each of 12
-/// levels), which would hang export on a hostile PDF.
-pub(crate) const MAX_FORM_VISITS: usize = 4096;
+/// a form that draws another form many times fan out exponentially (100 `Do`s on each of 50
+/// levels), which would hang export on a hostile PDF. The renderer paints as many forms nested
+/// in forms; this budget also counts the forms the page draws itself, so a page that draws one
+/// a million times stays bounded too. A label or table cell drawn as a form a few thousand
+/// times is read in full (#3120).
+pub const MAX_FORM_VISITS: usize = 50_000;
+
+/// One page's walk through the form XObjects it draws: how many it entered (the page's
+/// [`MAX_FORM_VISITS`]), and whether a limit left a form unread.
+#[derive(Default)]
+pub(crate) struct FormBudget {
+    visits: usize,
+    /// A form was left unread because it nests deeper than [`MAX_FORM_DEPTH`] or comes past
+    /// [`MAX_FORM_VISITS`]: what it draws is missing from the walk.
+    pub(crate) truncated: bool,
+}
 
 /// A form XObject a page draws: its object, content, resources and its matrix composed with the
 /// CTM at the `Do`.
@@ -1213,17 +1311,19 @@ pub(crate) struct FormCall {
 }
 
 /// The form XObject `name` in `resources`, drawn with `ctm`. `None` for images, missing names
-/// and forms already being read (`path`), nested too deep, or past the page's `visits` budget
-/// ([`MAX_FORM_VISITS`]); each form entered counts one visit.
+/// and forms already being read (`path`), and for forms nested too deep or past the page's
+/// budget, which `budget` records as truncated; each form entered counts one visit.
 pub(crate) fn form_call(
     doc: &Document,
     resources: &Dict,
     name: &[u8],
     ctm: Matrix,
     path: &[pdfcraft_cos::ObjRef],
-    visits: &mut usize,
+    budget: &mut FormBudget,
 ) -> Option<FormCall> {
-    if path.len() >= MAX_FORM_DEPTH || *visits >= MAX_FORM_VISITS {
+    let limited = path.len() >= MAX_FORM_DEPTH || budget.visits >= MAX_FORM_VISITS;
+    // Once a limit has cut the page short, refusing the rest costs nothing more.
+    if limited && budget.truncated {
         return None;
     }
     let xobjects = resources.get(b"XObject").map(|x| doc.resolve(x)).and_then(|x| x.as_dict().cloned())?;
@@ -1236,6 +1336,11 @@ pub(crate) fn form_call(
     if s.dict.name(b"Subtype") != Some(b"Form") {
         return None;
     }
+    // Only a form left unread loses content; an image at the limit is still read by its caller.
+    if limited {
+        budget.truncated = true;
+        return None;
+    }
     let m = s.dict.get(b"Matrix").map(|m| doc.resolve(m)).and_then(|m| {
         let a = m.as_array()?;
         let v: Vec<f64> = a.iter().filter_map(|x| doc.resolve(x).as_f64()).collect();
@@ -1243,7 +1348,7 @@ pub(crate) fn form_call(
     });
     // A form without its own resources uses the ones it was drawn with (PDF 1.1 files).
     let own = s.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned());
-    *visits = visits.saturating_add(1);
+    budget.visits = budget.visits.saturating_add(1);
     Some(FormCall {
         obj,
         data: s.decoded().unwrap_or_default(),
@@ -1254,14 +1359,15 @@ pub(crate) fn form_call(
 
 /// The lines a page shows as it reads, including text drawn by form XObjects (which
 /// [`text_lines`] leaves out because it can only rewrite the page's own streams). Lines from a
-/// form carry a stream number past the page's streams, one per form drawn.
-fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError> {
+/// form carry a stream number past the page's streams, one per form drawn. The flag is `true`
+/// when forms past [`MAX_FORM_DEPTH`] or [`MAX_FORM_VISITS`] were left unread.
+fn reading_lines(doc: &Document, page: usize) -> Result<(Vec<TextLine>, bool), EditError> {
     struct Walk<'a> {
         doc: &'a Document,
         lines: Vec<TextLine>,
         next_stream: usize,
         path: Vec<pdfcraft_cos::ObjRef>,
-        visits: usize,
+        budget: FormBudget,
     }
     /// `stream` gives the stream number of the operator at an index of `ops`.
     fn walk(w: &mut Walk, ops: &[Op], resources: &Dict, carry: &mut Carry, stream: &dyn Fn(usize) -> usize) {
@@ -1291,7 +1397,7 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
         }
     }
     fn enter(w: &mut Walk, resources: &Dict, name: &[u8], ts: Ts) {
-        let Some(form) = form_call(w.doc, resources, name, ts.ctm, &w.path, &mut w.visits) else { return };
+        let Some(form) = form_call(w.doc, resources, name, ts.ctm, &w.path, &mut w.budget) else { return };
         let ops = parse(&form.data).ops;
         // The form starts with the graphics state at its `Do`, its own matrix applied.
         let mut carry = Carry { ts: Ts { ctm: form.ctm, ..ts }, stack: Vec::new(), marked: Vec::new() };
@@ -1308,7 +1414,7 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
     let p = page_dict(doc, page)?;
     let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let streams = content_streams(doc, &p.dict);
-    let mut w = Walk { doc, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), visits: 0 };
+    let mut w = Walk { doc, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), budget: FormBudget::default() };
     let mut carry = Carry::new();
     // Read the page's streams as the one stream they are, in one pass, as rendering and editing
     // do: a comment, an operator's operands or a marked-content sequence (its /ActualText too)
@@ -1324,7 +1430,7 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
         l.text = crate::indic::to_logical(&l.text);
     }
     lines.retain(|l| !l.text.trim().is_empty());
-    Ok(lines)
+    Ok((lines, w.budget.truncated))
 }
 
 /// Text → the runs that show it: each run's font resource name and the bytes shown in that font.
@@ -1739,11 +1845,33 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
     replace_line_with_limit(doc, page, line, text, MAX_TYPE3_GLYPHS)
 }
 
+/// Refuses a rewrite that would remove text drawn as a clipping path (`4 Tr` to `7 Tr`). Such
+/// glyphs are not ink but a mask, and whatever is painted through them takes their shape.
+/// Removing the glyphs removes the mask, and the fill or image behind floods its own rectangle
+/// instead -- the artwork is destroyed, in a file that still opens without a warning (#3429).
+/// `clear_block` already refuses these for the same reason.
+///
+/// Every line the rewrite drops is checked, not only the one being replaced: a line's runs need
+/// not share a rendering mode (see [`TextLine::clips`]), and [`coincident_ops`] drops a whole
+/// overlapping line without regard to its mode -- so a mask could go with text that is ink.
+fn refuse_clipping_text(lines: &[TextLine], dropped: &std::collections::HashSet<usize>) -> Result<(), EditError> {
+    if lines.iter().any(|l| l.clips && l.ops.iter().any(|op| dropped.contains(op))) {
+        return Err(EditError::Invalid("text used as a clipping path cannot be edited: its glyphs mask the artwork behind them".into()));
+    }
+    Ok(())
+}
+
 /// [`replace_line`] with the most unique characters one generated font may hold (tests lower it).
 pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usize, text: &str, max_glyphs: usize) -> Result<LineEdit, EditError> {
     let text = text.replace(['\n', '\r'], " ");
     let lines = text_lines(doc, page)?;
     let target = lines.get(line).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no line {}", page + 1, line + 1)))?;
+    // Copies of the line drawn on the same baseline go with it, so the replacement is all that
+    // shows. Which operators go is settled here, before any font is generated, so that a refusal
+    // leaves the document untouched.
+    let mut drops = coincident_ops(&lines, &[&target]);
+    drops.extend(target.ops.iter().copied());
+    refuse_clipping_text(&lines, &drops)?;
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut fonts_res = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
@@ -1817,10 +1945,7 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
             }
         }
     }
-    // Rebuild: the line's first operator becomes the replacement, its others go. Copies of the
-    // line drawn on the same baseline go too, so the replacement is all that shows.
-    let mut drops = coincident_ops(&lines, &[&target]);
-    drops.extend(target.ops.iter().copied());
+    // Rebuild: the line's first operator becomes the replacement, its others go.
     let new_data = splice(&pieces, &ops, |i| if i == first { (std::mem::take(&mut replacement), false) } else { (Vec::new(), !drops.contains(&i)) });
     let contents = rewritten_contents(doc, &streams, new_data);
     let page_ref = p.obj;
@@ -1940,9 +2065,27 @@ pub fn clear_block(doc: &mut Document, page: usize, block: usize) -> Result<(), 
 /// The paragraphs on a page as a reader sees them, including text drawn by form XObjects
 /// (Export to Word, HTML and RTF). Read-only: indexes into this list are not
 /// [`text_blocks`] indexes, so they can't be passed to [`replace_block`] or [`rewrite_block`].
+/// [`reading_blocks_checked`] also says whether text was left out.
 pub fn reading_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
-    let lines = reading_lines(doc, page)?;
-    Ok(regions::group_reading_blocks(&lines))
+    reading_blocks_checked(doc, page).map(|r| r.blocks)
+}
+
+/// A page's paragraphs as a reader sees them ([`reading_blocks_checked`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReadingBlocks {
+    /// The paragraphs, as [`reading_blocks`] returns them.
+    pub blocks: Vec<TextBlock>,
+    /// The page draws forms nested deeper than [`MAX_FORM_DEPTH`], or more of them than
+    /// [`MAX_FORM_VISITS`]. Reading leaves those out to stay bounded on hostile files, so their
+    /// text is missing from `blocks`; [`crate::reading_images`] walks the same forms and misses
+    /// their images too.
+    pub truncated: bool,
+}
+
+/// [`reading_blocks`], saying whether the limits that bound reading left text out.
+pub fn reading_blocks_checked(doc: &Document, page: usize) -> Result<ReadingBlocks, EditError> {
+    let (lines, truncated) = reading_lines(doc, page)?;
+    Ok(ReadingBlocks { blocks: regions::group_reading_blocks(&lines), truncated })
 }
 
 // An ideographic space carries intentional Japanese spacing, including paragraph indentation.
@@ -2063,6 +2206,10 @@ fn rewrite_block_from(
     let blocks = group_blocks(&lines);
     let b = blocks.get(block).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no paragraph {}", page + 1, block + 1)))?;
     let members: Vec<&TextLine> = b.lines.iter().map(|i| &lines[*i]).collect();
+    // One clipping run is enough: rewriting the paragraph would drop its mask with the rest.
+    let mut dropped = coincident_ops(&lines, &members);
+    dropped.extend(members.iter().flat_map(|l| l.ops.iter().copied()));
+    refuse_clipping_text(&lines, &dropped)?;
     let first = members.first().copied().ok_or_else(|| EditError::Invalid("the paragraph has no source runs".into()))?;
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();

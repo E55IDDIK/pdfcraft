@@ -1571,3 +1571,77 @@ fn text_box_properties_change_the_font_size() {
     assert_eq!(doc.comment_props(0, 0).unwrap().font_size, Some(30.0));
     assert_eq!(doc.can_undo(), Some("Change comment properties"));
 }
+
+#[test]
+fn text_box_and_callout_properties_include_fill_and_thickness() {
+    use pdfcraft_engine::{Edit, LineEnding, NewAnnotation, Shape};
+    use pdfcraft_ui_egui::comments::CommentTool;
+    let mut h = harness(|_| {});
+    for (tool, shape) in [
+        (CommentTool::TextBox, Shape::TextBox { rect: [40.0, 600.0, 240.0, 640.0], font_size: 12.0 }),
+        (
+            CommentTool::Callout,
+            Shape::Callout {
+                rect: [40.0, 500.0, 240.0, 540.0],
+                knee: [30.0, 460.0],
+                point: [10.0, 440.0],
+                font_size: 12.0,
+                ending: LineEnding::OpenArrow,
+            },
+        ),
+    ] {
+        let index = comments(&h).len();
+        h.state_mut().apply_edit(Edit::AddAnnotation(NewAnnotation {
+            page: 0,
+            shape,
+            style: Default::default(),
+            contents: "Hello".into(),
+            author: "Ada".into(),
+        }));
+        h.run_steps(2);
+        h.state_mut().open_comment_props(0, index);
+        h.run_steps(2);
+        h.get_by_label("Fill colour");
+        {
+            let draft = h.state_mut().comment_props.as_mut().unwrap();
+            assert!(draft.original.fillable && draft.original.width.is_some());
+            draft.edited.fill = Some([1.0; 3]);
+            draft.edited.width = Some(3.0);
+        }
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        let p = doc.comment_props(0, index).unwrap();
+        assert_eq!((p.fill, p.width), (Some([1.0; 3]), Some(3.0)));
+        h.state_mut().make_comment_default(0, index);
+        assert_eq!(h.state().comment_prefs.style(tool).fill, Some([1.0; 3]));
+        assert_eq!(h.state().comment_prefs.style(tool).width, 3.0);
+    }
+}
+
+#[test]
+fn text_comments_can_save_a_zero_width_default() {
+    use pdfcraft_engine::{Edit, NewAnnotation, Shape};
+    use pdfcraft_ui_egui::comments::CommentTool;
+    let mut h = harness(|_| {});
+    let shape = Shape::TextBox { rect: [40.0, 600.0, 240.0, 640.0], font_size: 12.0 };
+    let mut style = pdfcraft_engine::Style::default_for(&shape);
+    style.width = 0.0;
+    h.state_mut().apply_edit(Edit::AddAnnotation(NewAnnotation { page: 0, shape, style, contents: "Hello".into(), author: "Ada".into() }));
+    h.run_steps(2);
+    h.state_mut().open_comment_props(0, 0);
+    h.run_steps(2);
+    assert_eq!(h.state().comment_props.as_ref().unwrap().edited.width, Some(0.0));
+    h.get_by_label("OK").click();
+    h.run_steps(2);
+    h.state_mut().make_comment_default(0, 0);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::TextBox).width, 0.0);
+    h.state_mut().comment_prefs.set_width(CommentTool::Callout, 0.0);
+    h.state_mut().comment_prefs.set_width(CommentTool::Rectangle, 0.0);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Callout).width, 0.0);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Rectangle).width, 0.5);
+    let mut restored = PdfCraftApp::new();
+    restored.restore(&h.state().persist());
+    assert_eq!(restored.comment_prefs.style(CommentTool::TextBox).width, 0.0);
+    assert_eq!(restored.comment_prefs.style(CommentTool::Callout).width, 0.0);
+}

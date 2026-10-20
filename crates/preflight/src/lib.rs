@@ -165,7 +165,7 @@ fn metadata(doc: &Document) -> Option<String> {
     let cat = catalog(doc);
     let m = doc.resolve(cat.get(b"Metadata")?);
     match &*m {
-        Object::Stream(s) => s.decoded().ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
+        Object::Stream(s) => s.decoded_within(xmp::MAX_XMP_BYTES).ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
         _ => None,
     }
 }
@@ -174,10 +174,10 @@ fn metadata(doc: &Document) -> Option<String> {
 pub fn declared(doc: &Document) -> Declared {
     let mut d = Declared::default();
     if let Some(x) = metadata(doc) {
-        let part = xmp::value(&x, "pdfaid:part").and_then(|p| p.parse().ok());
-        let conf = xmp::value(&x, "pdfaid:conformance").unwrap_or_default();
+        let part = xmp::identifier(&x, xmp::PDFA_ID, "part").and_then(|p| p.parse().ok());
+        let conf = xmp::identifier(&x, xmp::PDFA_ID, "conformance").unwrap_or_default();
         d.pdfa = part.map(|p| (p, conf.to_uppercase()));
-        d.pdfua = xmp::value(&x, "pdfuaid:part").and_then(|p| p.parse().ok());
+        d.pdfua = xmp::identifier(&x, xmp::PDFUA_ID, "part").and_then(|p| p.parse().ok());
     }
     let cat = catalog(doc);
     if let Some(list) = cat.get(b"OutputIntents").map(|o| doc.resolve(o)).and_then(|o| o.as_array().cloned()) {
@@ -423,8 +423,8 @@ pub fn verify(doc: &Document, level: Level) -> Vec<Issue> {
     match metadata(doc) {
         None => issue("6.6.2.1", "The document has no XMP metadata", None, None, true),
         Some(x) => {
-            let part = xmp::value(&x, "pdfaid:part");
-            let conf = xmp::value(&x, "pdfaid:conformance");
+            let part = xmp::identifier(&x, xmp::PDFA_ID, "part");
+            let conf = xmp::identifier(&x, xmp::PDFA_ID, "conformance");
             if part.as_deref() != Some(&level.part().to_string()) || conf.as_deref().map(str::to_uppercase).as_deref() != Some("B") {
                 issue("6.6.4", "The metadata doesn't identify the file as {}", Some(level.label().to_owned()), None, true);
             }

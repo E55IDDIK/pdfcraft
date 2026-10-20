@@ -4342,7 +4342,7 @@ impl Session {
         }
         guard(|| match format {
             DataFormat::Xfdf => Ok(pdfcraft_xfdf::export_xfdf(&cos, comments, fields, &doc.name).into_bytes()),
-            DataFormat::Fdf => Ok(pdfcraft_xfdf::export_fdf(&cos, comments, fields, &doc.name)),
+            DataFormat::Fdf => pdfcraft_xfdf::export_fdf(&cos, comments, fields, &doc.name).map_err(|e| e.to_string()),
             DataFormat::Xml | DataFormat::Xdp if xfa => {
                 pdfcraft_xfa::export_data(&cos, format == DataFormat::Xdp, &doc.name).map(String::into_bytes).map_err(|e| e.to_string())
             }

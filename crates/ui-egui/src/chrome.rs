@@ -533,88 +533,100 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         });
 }
 
+/// Keep menus usable when their contents are taller than the window.
+pub(crate) fn scroll_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let height = (ui.ctx().content_rect().height() - 24.0).max(40.0);
+    egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]).show(ui, add);
+}
+
 fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let resp = widgets::ghost_button(ui, "panel-left", tl!("Menu"));
     egui::Popup::menu(&resp).show(|ui| {
-        ui.set_min_width(230.0);
-        ui.menu_button(tl!("File"), |ui| crate::commands::registry_menu(app, ui, "File"));
-        ui.menu_button(tl!("Edit"), |ui| crate::commands::registry_menu(app, ui, "Edit"));
-        ui.menu_button(tl!("Pages"), |ui| crate::commands::registry_menu(app, ui, "Pages"));
-        ui.menu_button(tl!("View"), |ui| {
-            if let Some(i) = app.active {
-                let v = &mut app.views[i];
-                let ctx = ui.ctx().clone();
-                let key = |s| crate::commands::shortcut_label(&ctx, s);
-                use crate::commands::{ACTUAL_SIZE, FIT_WIDTH, NEXT_VIEW, PAGE_LEVEL, PREV_VIEW, ROTATE_CCW, ROTATE_CW, ZOOM_IN, ZOOM_OUT};
-                ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small());
-                if widgets::menu_item(ui, tl!("Actual size"), &key(ACTUAL_SIZE)).clicked() {
-                    v.set_zoom(1.0);
-                }
-                if widgets::menu_item(ui, tl!("Zoom to page level"), &key(PAGE_LEVEL)).clicked() {
-                    v.fit = Fit::Page;
-                }
-                if widgets::menu_item(ui, tl!("Fit to width"), &key(FIT_WIDTH)).clicked() {
-                    v.fit = Fit::Width;
-                }
-                if widgets::menu_item(ui, tl!("Fit to height"), "").clicked() {
-                    v.fit = Fit::Height;
-                    v.goto = Some((v.current, 0.0));
-                }
-                if widgets::menu_item(ui, tl!("Fit visible"), &crate::commands::command_shortcut_label(&ctx, "view.fit_visible")).clicked() {
-                    ui.close();
-                    app.execute("view.fit_visible");
-                    return;
-                }
-                if widgets::menu_item(ui, tl!("Zoom in"), &key(ZOOM_IN)).clicked() {
-                    v.zoom_step(true);
-                }
-                if widgets::menu_item(ui, tl!("Zoom out"), &key(ZOOM_OUT)).clicked() {
-                    v.zoom_step(false);
-                }
-                if widgets::menu_item(ui, tl!("Rotate view clockwise"), &key(ROTATE_CW)).clicked() {
-                    v.rotate_view(true);
-                }
-                if widgets::menu_item(ui, tl!("Rotate view counterclockwise"), &key(ROTATE_CCW)).clicked() {
-                    v.rotate_view(false);
-                }
-                ui.separator();
-                ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small());
-                if ui.add_enabled(!v.back.is_empty(), egui::Button::new(tl!("Previous view")).shortcut_text(key(PREV_VIEW))).clicked() {
-                    v.view_history(false);
-                }
-                if ui.add_enabled(!v.forward.is_empty(), egui::Button::new(tl!("Next view")).shortcut_text(key(NEXT_VIEW))).clicked() {
-                    v.view_history(true);
-                }
-                ui.separator();
-                if let Some(id) = page_display_menu(ui, &app.views[i]) {
-                    app.execute(id);
-                }
-                ui.separator();
-            }
-            crate::commands::registry_menu(app, ui, "View");
-            ui.menu_button(tl!("Display theme"), |ui| theme_menu(app, ui));
-            ui.menu_button(tl!("Side panels"), |ui| {
-                for (p, label) in [
-                    (RightPanel::Comments, tl!("Comments")),
-                    (RightPanel::Bookmarks, tl!("Bookmarks")),
-                    (RightPanel::Pages, tl!("Pages")),
-                    (RightPanel::Fields, tl!("Fields")),
-                    (RightPanel::Layers, tl!("Layers")),
-                    (RightPanel::Attachments, tl!("Attachments")),
-                    (RightPanel::Signatures, tl!("Signatures")),
-                    (RightPanel::Accessibility, tl!("Accessibility Checker")),
-                    (RightPanel::Tags, tl!("Tags")),
-                    (RightPanel::Search, tl!("Search")),
-                    (RightPanel::Compare, tl!("Compare")),
-                ] {
-                    if ui.add(widgets::radio(app.right == Some(p), tl!(label))).clicked() {
-                        app.choose_right_panel(Some(p));
+        scroll_menu(ui, |ui| {
+            ui.set_min_width(230.0);
+            ui.menu_button(tl!("File"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "File")));
+            ui.menu_button(tl!("Edit"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Edit")));
+            ui.menu_button(tl!("Pages"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Pages")));
+            ui.menu_button(tl!("View"), |ui| {
+                scroll_menu(ui, |ui| {
+                    if let Some(i) = app.active {
+                        let v = &mut app.views[i];
+                        let ctx = ui.ctx().clone();
+                        let key = |s| crate::commands::shortcut_label(&ctx, s);
+                        use crate::commands::{ACTUAL_SIZE, FIT_WIDTH, NEXT_VIEW, PAGE_LEVEL, PREV_VIEW, ROTATE_CCW, ROTATE_CW, ZOOM_IN, ZOOM_OUT};
+                        ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small());
+                        if widgets::menu_item(ui, tl!("Actual size"), &key(ACTUAL_SIZE)).clicked() {
+                            v.set_zoom(1.0);
+                        }
+                        if widgets::menu_item(ui, tl!("Zoom to page level"), &key(PAGE_LEVEL)).clicked() {
+                            v.fit = Fit::Page;
+                        }
+                        if widgets::menu_item(ui, tl!("Fit to width"), &key(FIT_WIDTH)).clicked() {
+                            v.fit = Fit::Width;
+                        }
+                        if widgets::menu_item(ui, tl!("Fit to height"), "").clicked() {
+                            v.fit = Fit::Height;
+                            v.goto = Some((v.current, 0.0));
+                        }
+                        if widgets::menu_item(ui, tl!("Fit visible"), &crate::commands::command_shortcut_label(&ctx, "view.fit_visible")).clicked() {
+                            ui.close();
+                            app.execute("view.fit_visible");
+                            return;
+                        }
+                        if widgets::menu_item(ui, tl!("Zoom in"), &key(ZOOM_IN)).clicked() {
+                            v.zoom_step(true);
+                        }
+                        if widgets::menu_item(ui, tl!("Zoom out"), &key(ZOOM_OUT)).clicked() {
+                            v.zoom_step(false);
+                        }
+                        if widgets::menu_item(ui, tl!("Rotate view clockwise"), &key(ROTATE_CW)).clicked() {
+                            v.rotate_view(true);
+                        }
+                        if widgets::menu_item(ui, tl!("Rotate view counterclockwise"), &key(ROTATE_CCW)).clicked() {
+                            v.rotate_view(false);
+                        }
+                        ui.separator();
+                        ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small());
+                        if ui.add_enabled(!v.back.is_empty(), egui::Button::new(tl!("Previous view")).shortcut_text(key(PREV_VIEW))).clicked() {
+                            v.view_history(false);
+                        }
+                        if ui.add_enabled(!v.forward.is_empty(), egui::Button::new(tl!("Next view")).shortcut_text(key(NEXT_VIEW))).clicked() {
+                            v.view_history(true);
+                        }
+                        ui.separator();
+                        if let Some(id) = page_display_menu(ui, &app.views[i]) {
+                            app.execute(id);
+                        }
+                        ui.separator();
                     }
-                }
+                    crate::commands::registry_menu(app, ui, "View");
+                    ui.menu_button(tl!("Display theme"), |ui| theme_menu(app, ui));
+                    ui.menu_button(tl!("Side panels"), |ui| {
+                        scroll_menu(ui, |ui| {
+                            for (p, label) in [
+                                (RightPanel::Comments, tl!("Comments")),
+                                (RightPanel::Bookmarks, tl!("Bookmarks")),
+                                (RightPanel::Pages, tl!("Pages")),
+                                (RightPanel::Fields, tl!("Fields")),
+                                (RightPanel::Layers, tl!("Layers")),
+                                (RightPanel::Attachments, tl!("Attachments")),
+                                (RightPanel::Signatures, tl!("Signatures")),
+                                (RightPanel::Accessibility, tl!("Accessibility Checker")),
+                                (RightPanel::Tags, tl!("Tags")),
+                                (RightPanel::Search, tl!("Search")),
+                                (RightPanel::Compare, tl!("Compare")),
+                            ] {
+                                if ui.add(widgets::radio(app.right == Some(p), tl!(label))).clicked() {
+                                    app.choose_right_panel(Some(p));
+                                }
+                            }
+                        })
+                    });
+                })
             });
-        });
-        ui.menu_button(tl!("Help"), |ui| crate::commands::registry_menu(app, ui, "Help"));
+            ui.menu_button(tl!("Help"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Help")));
+        })
     });
 }
 

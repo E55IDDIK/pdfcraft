@@ -51,6 +51,13 @@ pub enum RedactError {
         "redaction appearance has invalid geometry or exceeds the 8 MiB budget; reduce the marked area, turn off repeated text or apply fewer pages at once (nothing was redacted)"
     )]
     OverlayLimit,
+    /// The structure tree couldn't be cleaned completely (#3302): an element written in place that
+    /// would need changing, an element whose inherited page can't be found, or a tree too large to
+    /// walk. Tags that kept the removed text or annotation would undo the redaction.
+    #[error(
+        "the document's tags can't be cleaned completely (an element written in place, or a structure tree too large or too deep to follow); the operation was refused"
+    )]
+    Tags,
     #[error(transparent)]
     Edit(#[from] pdfcraft_edit::EditError),
     #[error(transparent)]
@@ -305,6 +312,12 @@ fn localize_resources(doc: &mut Document, selected: &[usize]) -> Result<(), pdfc
 
 /// Apply every redaction mark (or only those on `pages`, 0-based). Irreversible for the saved
 /// file; callers keep the previous document for undo.
+///
+/// # Errors
+///
+/// This operation is not transactional: an error may leave `doc` partially modified, with
+/// sensitive content still present. Call this on a working clone and replace the original only
+/// on success. On any error, discard the working clone; do not save or reuse it.
 pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, RedactError> {
     let all_marks = marks(doc);
     let chosen: Vec<&Mark> = all_marks.iter().filter(|m| pages.is_none_or(|p| p.contains(&m.page))).collect();

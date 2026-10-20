@@ -38,6 +38,9 @@ pub struct Focus {
     /// Date fields: the month the calendar shows (year, month 1–12), and where it was drawn.
     pub calendar: Option<(i32, u32)>,
     pub calendar_rect: Option<egui::Rect>,
+    /// The text the calendar last saw, so it moves to a typed date once, when the typing becomes
+    /// a whole date, and otherwise keeps the month its arrows turned to.
+    pub calendar_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -90,6 +93,7 @@ fn open_focus(f: &FormField, widget: usize) -> Focus {
         press: None,
         calendar: None,
         calendar_rect: None,
+        calendar_text: None,
     }
 }
 
@@ -255,11 +259,19 @@ const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "Jun
 fn calendar(ctx: &egui::Context, view: &mut DocView, field: egui::Rect, fmt: &str, today: (i64, u32, u32)) -> Option<String> {
     use pdfcraft_engine::form_scripts::{DateTime, format_date, parse_date};
     let fx = view.forms.focus.as_mut()?;
-    let (mut y, mut m) = fx.calendar.unwrap_or_else(|| match parse_date(&fx.text, fmt) {
-        Some(d) => (d.y, d.m),
-        None => (today.0 as i32, today.1),
-    });
     let current = parse_date(&fx.text, fmt);
+    // A whole date typed since the last frame moves the calendar to it; half a date, or text
+    // that hasn't changed, leaves it on the month it shows (the one the arrows turned to).
+    let changed = fx.calendar_text.as_deref() != Some(fx.text.as_str());
+    let (mut y, mut m) = match (fx.calendar, current) {
+        (Some(_), Some(d)) if changed => (d.y, d.m),
+        (Some(shown), _) => shown,
+        (None, Some(d)) => (d.y, d.m),
+        (None, None) => (today.0 as i32, today.1),
+    };
+    if changed {
+        fx.calendar_text = Some(fx.text.clone());
+    }
     let mut picked = None;
     let area = egui::Area::new(egui::Id::new(("date-picker", view.id.0)))
         .order(egui::Order::Foreground)

@@ -371,3 +371,49 @@ fn device_colour_in_forms_patterns_and_glyphs_is_found() {
         assert!(declared(&doc).output_intents.is_empty(), "{what}: an sRGB output intent was added to a CMYK document: {:?}", r.fixed);
     }
 }
+
+#[test]
+fn standards_identification_uses_namespace_not_prefix() {
+    fn with_xmp(xmp: &str) -> Document {
+        let stream = format!("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{xmp}\nendstream", xmp.len());
+        build(&["<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>", &stream], "")
+    }
+    let attribute = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:a="http://www.aiim.org/pdfa/ns/id/" xmlns:u="http://www.aiim.org/pdfua/ns/id/" a:part="2" a:conformance="b" u:part="1"/></rdf:RDF>"#;
+    let element = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description><part xmlns="http://www.aiim.org/pdfa/ns/id/">2</part><x:conformance xmlns:x="http://www.aiim.org/pdfa/ns/id/" >B</x:conformance></rdf:Description></rdf:RDF>"#;
+    for xml in [attribute, element] {
+        let doc = with_xmp(xml);
+        assert_eq!(declared(&doc).pdfa, Some((2, "B".into())));
+        assert!(!verify(&doc, Level::A2b).iter().any(|i| i.clause == "6.6.4"));
+    }
+    assert_eq!(declared(&with_xmp(attribute)).pdfua, Some(1));
+    let wrong = r#"<root xmlns:pdfaid="urn:wrong" pdfaid:part="2" pdfaid:conformance="B"/>"#;
+    let doc = with_xmp(wrong);
+    assert_eq!(declared(&doc).pdfa, None);
+    assert!(verify(&doc, Level::A2b).iter().any(|i| i.clause == "6.6.4"));
+    let nested = format!("{}{}", "<n>".repeat(1100), "</n>".repeat(1100));
+    assert_eq!(declared(&with_xmp(&nested)).pdfa, None);
+}
+
+#[test]
+fn oversized_xmp_is_refused_while_decoding() {
+    let xmp = " ".repeat(xmp::MAX_XMP_BYTES + 1);
+    let stream = format!("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{xmp}\nendstream", xmp.len());
+    let doc = build(&["<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>", &stream], "");
+    assert!(metadata(&doc).is_none());
+    assert_eq!(declared(&doc).pdfa, None);
+
+    use std::io::Write as _;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(xmp.as_bytes()).unwrap();
+    let compressed = z.finish().unwrap();
+    let hex: String = compressed.iter().map(|byte| format!("{byte:02X}")).collect();
+    let data = format!("{hex}>");
+    let stream =
+        format!("<< /Type /Metadata /Subtype /XML /Filter [/ASCIIHexDecode /FlateDecode] /Length {} >>\nstream\n{data}\nendstream", data.len());
+    let doc = build(&["<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>", &stream], "");
+    let cat = catalog(&doc);
+    let raw = doc.resolve(cat.get(b"Metadata").unwrap());
+    let Object::Stream(stream) = &*raw else { panic!("fixture has no metadata stream") };
+    assert_eq!(stream.decoded().unwrap().len(), xmp::MAX_XMP_BYTES + 1, "fixture must actually decompress");
+    assert!(metadata(&doc).is_none(), "compressed metadata must be limited during decoding");
+}
